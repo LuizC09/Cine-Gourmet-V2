@@ -1,100 +1,156 @@
 import streamlit as st
 import google.generativeai as genai
 import requests
-from supabase import create_client, Client
+from supabase import create_client
 
-# === SEGREDOS (O Cofre Digital) ===
-# O código busca as chaves nas configurações do servidor
+# === CONFIGURAÇÃO ===
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     TRAKT_CLIENT_ID = st.secrets["TRAKT_CLIENT_ID"]
-except FileNotFoundError:
-    st.error("As chaves de API não foram encontradas. Configure os 'Secrets' no Streamlit Cloud.")
+except:
+    st.error("Configure os Secrets!")
     st.stop()
 
-TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
-
-# Configurações
 genai.configure(api_key=GOOGLE_API_KEY)
-st.set_page_config(page_title="CineGourmet AI", page_icon="🍿", layout="wide")
+st.set_page_config(page_title="CineGourmet Pro", page_icon="🧠", layout="wide")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 
-@st.cache_resource
-def init_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+# === FUNÇÕES INTELIGENTES ===
 
-supabase = init_supabase()
-
-def get_trakt_history(username):
+def get_trakt_watched_ids(username):
+    """Pega os IDs (TMDB) de TUDO que o usuário já viu para não repetir"""
     headers = {
         'Content-Type': 'application/json',
         'trakt-api-version': '2',
         'trakt-api-key': TRAKT_CLIENT_ID
     }
-    # Tenta pegar histórico ou watchlist
-    url = f"https://api.trakt.tv/users/{username}/history/movies?limit=5"
+    # Pega o histórico de assistidos (apenas IDs para ser leve)
+    url = f"https://api.trakt.tv/users/{username}/watched/movies"
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            return [item['movie']['title'] for item in response.json()]
+            data = response.json()
+            # Cria uma lista só com os números dos IDs do TMDB
+            watched_ids = [item['movie']['ids']['tmdb'] for item in data if item['movie']['ids'].get('tmdb')]
+            return watched_ids
     except:
-        return None
-    return None
+        return []
+    return []
 
-def fix_poster(path):
-    if not path: return "https://via.placeholder.com/500x750?text=Sem+Poster"
-    return f"{TMDB_IMAGE_BASE}{path if path.startswith('/') else '/' + path}"
+def get_trakt_profile_text(username):
+    """Cria o texto para a IA ler o perfil"""
+    headers = {
+        'Content-Type': 'application/json',
+        'trakt-api-version': '2',
+        'trakt-api-key': TRAKT_CLIENT_ID
+    }
+    url_hist = f"https://api.trakt.tv/users/{username}/history/movies?limit=10"
+    url_favs = f"https://api.trakt.tv/users/{username}/ratings/movies/9,10?limit=10"
+    
+    texto_perfil = ""
+    try:
+        # Últimos vistos
+        r = requests.get(url_hist, headers=headers)
+        if r.status_code == 200:
+            filmes = [i['movie']['title'] for i in r.json()]
+            texto_perfil += f"Recentemente assistiu: {', '.join(filmes)}. "
+            
+        # Favoritos
+        r = requests.get(url_favs, headers=headers)
+        if r.status_code == 200:
+            filmes = [i['movie']['title'] for i in r.json()]
+            texto_perfil += f"Seus favoritos supremos são: {', '.join(filmes)}."
+    except: pass
+    
+    return texto_perfil
+
+def analyze_taste(profile_text):
+    if not profile_text: return ""
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    prompt = f"""
+    Analise este histórico de filmes: "{profile_text}"
+    Descreva em UMA frase o gosto dessa pessoa (ex: Gosta de terror psicológico e dramas lentos).
+    """
+    try:
+        return model.generate_content(prompt).text.strip()
+    except: return ""
 
 # === INTERFACE ===
-st.title("🍿 CineGourmet: Cloud Edition")
-st.caption("Powered by Google Gemini & Supabase")
+st.title("🧠 CineGourmet: Anti-Déjà Vu Edition")
+st.caption("Agora filtra automaticamente o que você já assistiu no Trakt.")
 
 with st.sidebar:
-    st.header("Configurações")
-    trakt_user = st.text_input("Usuário Trakt (Opcional)")
-    threshold = st.slider("Exatidão", 0.0, 1.0, 0.45)
+    st.header("Conectar Trakt")
+    trakt_user = st.text_input("Usuário Trakt")
+    
+    # Variáveis de Sessão para guardar o estado
+    if 'watched_ids' not in st.session_state: st.session_state['watched_ids'] = []
+    if 'persona' not in st.session_state: st.session_state['persona'] = ""
 
-query = st.text_area("O que vamos assistir hoje?", placeholder="Descreva a vibe, o enredo ou misture filmes...")
+    if trakt_user and st.button("Carregar Perfil"):
+        with st.spinner("Baixando histórico completo..."):
+            # 1. Pega IDs para bloquear
+            ids = get_trakt_watched_ids(trakt_user)
+            st.session_state['watched_ids'] = ids
+            
+            # 2. Pega texto para analisar
+            raw_text = get_trakt_profile_text(trakt_user)
+            persona = analyze_taste(raw_text)
+            st.session_state['persona'] = persona
+            
+            st.success(f"Perfil carregado! {len(ids)} filmes bloqueados.")
+
+    if st.session_state['persona']:
+        st.info(f"🧬 **Perfil:** {st.session_state['persona']}")
+
+st.divider()
+
+user_query = st.text_area("O que você quer ver hoje?", placeholder="Ex: Sci-fi cabeça...")
 
 if st.button("Recomendar", type="primary"):
-    if not query:
+    if not user_query:
         st.warning("Digita algo!")
     else:
-        contexto = ""
-        if trakt_user:
-            with st.spinner("Analisando perfil Trakt..."):
-                filmes = get_trakt_history(trakt_user)
-                if filmes:
-                    st.toast(f"Perfil carregado: {', '.join(filmes)}")
-                    contexto = f" O usuário gosta de: {', '.join(filmes)}."
-        
-        with st.spinner("Consultando o Oráculo..."):
+        # Monta Prompt
+        prompt_final = user_query
+        if st.session_state['persona']:
+            prompt_final += f". O usuário tem esse gosto: {st.session_state['persona']}"
+
+        with st.spinner("Processando..."):
             try:
-                # Gera vetor com Google (mesmo modelo do banco)
+                # 1. Vetor
                 vector = genai.embed_content(
                     model="models/text-embedding-004",
-                    content=query + contexto,
+                    content=prompt_final,
                     task_type="retrieval_query"
                 )['embedding']
 
+                # 2. Busca no Supabase COM FILTRO (A mágica)
                 response = supabase.rpc("match_movies", {
                     "query_embedding": vector,
-                    "match_threshold": threshold,
-                    "match_count": 8
+                    "match_threshold": 0.40,
+                    "match_count": 8,
+                    "filter_ids": st.session_state['watched_ids'] # <--- AQUI BLOQUEIA OS VISTOS
                 }).execute()
 
-                if not response.data:
-                    st.error("Nenhum filme encontrado. Tente baixar a 'Exatidão'.")
-                else:
+                if response.data:
                     cols = st.columns(4)
-                    for i, movie in enumerate(response.data):
+                    for i, m in enumerate(response.data):
                         with cols[i % 4]:
-                            st.image(fix_poster(movie['poster_path']), use_container_width=True)
-                            st.markdown(f"**{movie['title']}**")
-                            with st.expander("Ver Sinopse"):
-                                st.write(movie['overview'])
-                                st.caption(f"Match: {int(movie['similarity']*100)}%")
-
+                            poster = m['poster_path'] if m['poster_path'] else ""
+                            if poster and not poster.startswith("http"):
+                                poster = TMDB_IMAGE + (poster if poster.startswith("/") else "/" + poster)
+                            
+                            st.image(poster, use_container_width=True)
+                            st.markdown(f"**{m['title']}**")
+                            with st.expander("Info"):
+                                st.write(m['overview'])
+                                st.caption(f"Match: {int(m['similarity']*100)}%")
+                else:
+                    st.warning("Nada encontrado. Talvez você já tenha visto todos os filmes bons desse gênero! 😂")
+            
             except Exception as e:
                 st.error(f"Erro: {e}")
