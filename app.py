@@ -21,11 +21,11 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 TMDB_LOGO = "https://image.tmdb.org/t/p/original"
 
-# === FUNÇÕES INTELIGENTES ===
+# === FUNÇÕES DE INTEGRAÇÃO (TRAKT, TMDB, YOUTUBE) ===
 
 def get_trakt_profile_data(username, content_type="movies"):
     """
-    Baixa avaliações e separa o que o usuário AMOU do que ele ODIOU.
+    Baixa o perfil do Trakt separando o que AMOU (9-10), CURTIU (7-8) e ODIOU (1-5).
     """
     headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
     data = {"history": [], "loved": [], "liked": [], "hated": [], "watched_ids": []}
@@ -34,37 +34,33 @@ def get_trakt_profile_data(username, content_type="movies"):
     item_key = 'show' if content_type == "tv" else 'movie'
 
     try:
-        # 1. Watched IDs (Para não repetir)
+        # 1. Watched IDs (Para não recomendar repetido)
         r_watched = requests.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}", headers=headers)
         if r_watched.status_code == 200:
             data["watched_ids"] = [i[item_key]['ids']['tmdb'] for i in r_watched.json() if i[item_key]['ids'].get('tmdb')]
 
-        # 2. Histórico (Últimos vistos)
+        # 2. Histórico Recente
         r_hist = requests.get(f"https://api.trakt.tv/users/{username}/history/{t_type}?limit=10", headers=headers)
         if r_hist.status_code == 200:
             data["history"] = [i[item_key]['title'] for i in r_hist.json()]
 
-        # 3. AVALIAÇÕES (Ponderar Nota)
+        # 3. Avaliações (Para entender o gosto)
         r_ratings = requests.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=50", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
                 title = item[item_key]['title']
                 rating = item['rating']
                 
-                if rating >= 9:
-                    data["loved"].append(f"{title} ({rating}/10)")
-                elif rating >= 7:
-                    data["liked"].append(f"{title} ({rating}/10)")
-                elif rating <= 5:
-                    data["hated"].append(f"{title} ({rating}/10)")
+                entry = f"{title} ({rating}/10)"
+                if rating >= 9: data["loved"].append(entry)
+                elif rating >= 7: data["liked"].append(entry)
+                elif rating <= 5: data["hated"].append(entry)
 
-    except Exception as e:
-        pass
-        
+    except Exception as e: pass
     return data
 
 def get_watch_providers(content_id, content_type, filter_providers=None):
-    """Busca onde assistir (Netflix, Prime, etc)"""
+    """Verifica disponibilidade em streamings no Brasil"""
     url = f"https://api.themoviedb.org/3/{content_type}/{content_id}/watch/providers?api_key={TMDB_API_KEY}"
     try:
         r = requests.get(url)
@@ -83,18 +79,17 @@ def get_watch_providers(content_id, content_type, filter_providers=None):
     return False, [], []
 
 def get_trailer_url(content_id, content_type):
-    """Busca o trailer no YouTube via TMDB"""
+    """Busca link do trailer no YouTube"""
     url = f"https://api.themoviedb.org/3/{content_type}/{content_id}/videos?api_key={TMDB_API_KEY}&language=pt-BR"
     try:
         r = requests.get(url)
         data = r.json()
-        # Tenta achar trailer dublado ou legendado em PT
         if 'results' in data:
             for v in data['results']:
                 if v['site'] == 'YouTube' and v['type'] == 'Trailer':
                     return f"https://www.youtube.com/watch?v={v['key']}"
             
-            # Se não achar em PT, tenta em Inglês (fallback)
+            # Fallback para Inglês
             url_en = f"https://api.themoviedb.org/3/{content_type}/{content_id}/videos?api_key={TMDB_API_KEY}&language=en-US"
             r_en = requests.get(url_en)
             data_en = r_en.json()
@@ -105,25 +100,21 @@ def get_trailer_url(content_id, content_type):
     return None
 
 def get_trakt_url(content_id, content_type):
-    """Gera o link para a página do Trakt"""
+    """Link profundo para o Trakt"""
     type_slug = "movie" if content_type == "movie" else "show"
-    # Link de busca direta pelo ID é mais seguro
     return f"https://trakt.tv/search/tmdb/{content_id}?id_type={type_slug}"
 
 def explain_choice(title, context_str, user_query, overview, rating):
+    """Usa IA para explicar a escolha"""
     prompt = f"""
-    Atue como um crítico de cinema perspicaz.
-    
-    PERFIL DO USUÁRIO:
-    {context_str}
-    
+    Atue como um curador de cinema perspicaz.
+    PERFIL DO USUÁRIO: {context_str}
     PEDIDO: "{user_query}"
-    RECOMENDAÇÃO: "{title}" (Nota Pública: {rating}/10).
+    RECOMENDAÇÃO: "{title}" (Nota TMDB: {rating}/10).
     SINOPSE: {overview}
 
-    TAREFA:
-    Explique em UMA frase por que essa obra se encaixa no perfil do usuário.
-    Se o usuário tem filmes que odeia no perfil, mencione sutilmente que este filme é melhor que eles.
+    TAREFA: Explique em UMA frase por que essa obra se encaixa no perfil.
+    Se a nota for alta, mencione que é aclamado. Se o usuário odeia algo parecido, diferencie este filme.
     """
     try:
         model = genai.GenerativeModel('models/gemini-2.0-flash')
@@ -156,15 +147,15 @@ with st.sidebar:
         with st.spinner("Analisando notas no Trakt..."):
             if user_a: st.session_state['data_a'] = get_trakt_profile_data(user_a, api_type)
             if user_b: st.session_state['data_b'] = get_trakt_profile_data(user_b, api_type)
-            st.success("Perfil atualizado com suas notas!")
+            st.success("Perfil atualizado!")
     
     st.divider()
-    st.subheader("📺 Meus Streamings")
+    st.subheader("📺 Streamings")
     services = ["Netflix", "Amazon Prime Video", "Disney Plus", "Max", "Apple TV Plus", "Globoplay"]
     my_services = st.multiselect("O que você assina?", services)
     threshold = st.slider("Ousadia", 0.0, 1.0, 0.45)
 
-# --- CONSTRUÇÃO DO CONTEXTO INTELIGENTE ---
+# --- CONSTRUÇÃO DO CONTEXTO ---
 context = ""
 blocked_ids = []
 
@@ -187,23 +178,22 @@ if mode == "Casal" and 'data_b' in st.session_state:
 
 query = st.text_area("O que você busca?", placeholder="Deixe vazio para recomendação automática baseada nas suas notas...")
 
-# Botão principal
 btn_label = "🎲 Surpreenda-me" if not query else "🚀 Buscar"
 
 if st.button(btn_label, type="primary"):
     
-    # Lógica Automática vs Manual
+    # Lógica Automática
     if not query:
         if not context:
             st.error("Para recomendação automática, sincronize seu Trakt primeiro!")
             st.stop()
-        final_prompt = f"Analise profundamente este perfil de notas: {context}. Recomende algo que se encaixe nos gostos (AMOU) e fique longe do que ele ODIOU."
-        query_display = "Baseado nas suas Notas (Automático)"
+        final_prompt = f"Analise este perfil de notas: {context}. Recomende algo que ele vai AMAR e evite o que ele ODEIA."
+        query_display = "Modo Automático (Baseado em Notas)"
     else:
-        final_prompt = f"Pedido: {query}. Contexto de Gosto: {context}"
+        final_prompt = f"Pedido: {query}. Contexto: {context}"
         query_display = query
 
-    with st.spinner("Processando suas notas e preferências..."):
+    with st.spinner("Analisando perfil, buscando títulos e verificando streamings..."):
         try:
             # 1. Embedding
             vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
@@ -216,7 +206,7 @@ if st.button(btn_label, type="primary"):
                 "filter_ids": blocked_ids
             }).execute()
 
-            # 3. Filtros (Streaming)
+            # 3. Filtros
             results = []
             if response.data:
                 for item in response.data:
@@ -230,7 +220,7 @@ if st.button(btn_label, type="primary"):
             
             # 4. Exibição
             if not results:
-                st.warning("Nada encontrado nos seus streamings ou com essa descrição.")
+                st.warning("Nada encontrado com esses critérios/streamings.")
             else:
                 st.subheader(f"Resultados para: {query_display}")
                 for item in results:
@@ -240,14 +230,13 @@ if st.button(btn_label, type="primary"):
                         img = item['poster_path']
                         if img: st.image(TMDB_IMAGE + img, use_container_width=True)
                         
-                        # Ícones de Streaming
                         if item['providers']:
                             cols = st.columns(len(item['providers']))
                             for i, p in enumerate(item['providers']):
                                 with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=30)
 
                     with c2:
-                        # Título e NOTA (Estrelas baseadas no TMDB)
+                        # Nota TMDB
                         rating = float(item.get('vote_average', 0) or 0)
                         stars = "⭐" * int(round(rating/2)) 
                         st.markdown(f"### {item['title']} | {rating:.1f}/10 {stars}")
@@ -255,13 +244,11 @@ if st.button(btn_label, type="primary"):
                         match_score = int(item['similarity']*100)
                         st.progress(match_score, text=f"Match IA: {match_score}%")
                         
-                        # Explicação com a Nota
                         expl = explain_choice(item['title'], context if context else "Geral", query_display, item['overview'], rating)
                         st.info(f"💡 {expl}")
                         
-                        # BOTÕES DE AÇÃO (TRAILER E TRAKT)
+                        # Botões
                         col_btn1, col_btn2 = st.columns(2)
-                        
                         trailer_url = get_trailer_url(item['id'], api_type)
                         if trailer_url:
                             with col_btn1: st.link_button("▶️ Trailer", trailer_url)
