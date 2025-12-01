@@ -44,12 +44,10 @@ def get_trakt_profile_data(username, content_type="movies"):
     item_key = 'show' if content_type == "tv" else 'movie'
 
     try:
-        # Pega IDs Vistos (Aumentei o limite para garantir que pegue tudo recente)
         r_watched = session.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}?limit=1000", headers=headers)
         if r_watched.status_code == 200:
             data["watched_ids"] = [i[item_key]['ids']['tmdb'] for i in r_watched.json() if i[item_key]['ids'].get('tmdb')]
 
-        # Pega Avaliações (Aumentei limite para 100 para ter mais base)
         r_ratings = session.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=100", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
@@ -230,7 +228,8 @@ with st.sidebar:
     st.divider()
     username = st.text_input("Usuário Trakt:", placeholder="ex: lscastro")
     
-    if st.button("🔄 Sincronizar"):
+    # TOOLTIP ADICIONADO AQUI
+    if st.button("🔄 Sincronizar", help="Baixa seu histórico e suas notas do Trakt para a IA aprender seu gosto. Faça isso sempre que assistir coisas novas."):
         if username:
             with st.spinner("Baixando dados..."):
                 st.session_state['trakt_data'] = get_trakt_profile_data(username, api_type)
@@ -248,7 +247,9 @@ with st.sidebar:
     st.subheader("📺 Meus Streamings")
     services_list = ["Netflix", "Amazon Prime Video", "Disney Plus", "Max", "Apple TV Plus", "Globoplay"]
     my_services = st.multiselect("Assinaturas:", services_list, default=services_list)
-    threshold = st.slider("Ousadia", 0.0, 1.0, 0.45)
+    
+    # TOOLTIP ADICIONADO AQUI
+    threshold = st.slider("Ousadia", 0.0, 1.0, 0.45, help="Quanto maior a ousadia, mais a IA recomenda filmes 'diferentões' que fogem um pouco do seu pedido. Baixe para ter resultados mais literais.")
 
 page = st.radio("Modo", ["🔍 Busca Rápida", "💎 Curadoria VIP"], horizontal=True, label_visibility="collapsed")
 st.divider()
@@ -268,12 +269,15 @@ if page == "🔍 Busca Rápida":
 
     query = st.text_area("O que você quer ver?", placeholder="Deixe vazio para 'Surpreenda-me'...")
     
-    # Lógica do Botão
-    btn_label = "🎲 Surpreenda-me" if not query else "🚀 Buscar"
+    # Lógica do Botão com TOOLTIPS
+    if not query:
+        btn_label = "🎲 Surpreenda-me"
+        help_text = "Modo Automático: A IA ignora o texto e recomenda obras-primas baseadas puramente na sua psicologia (o que você ama vs odeia)."
+    else:
+        btn_label = "🚀 Buscar"
+        help_text = "Modo Busca: A IA cruza o que você digitou com o seu perfil de gosto pessoal."
     
-    if st.button(btn_label):
-        
-        # Define o prompt baseado se tem texto ou não
+    if st.button(btn_label, help=help_text):
         if not query:
             if not context_str:
                 st.error("Para surpresas, preciso que você sincronize o Trakt primeiro!")
@@ -302,8 +306,8 @@ if page == "🔍 Busca Rápida":
     # Exibição
     if 'search_results' in st.session_state and st.session_state['search_results']:
         
-        # --- FEATURE NOVA: MARATONA ---
-        if st.button("🍿 Gerar Roteiro de Maratona (3 Filmes)"):
+        # --- FEATURE NOVA: MARATONA (COM TOOLTIP) ---
+        if st.button("🍿 Gerar Roteiro de Maratona (3 Filmes)", help="A IA analisa os resultados abaixo e cria uma sequência lógica de 3 filmes (Começo, Meio e Fim) para você assistir hoje."):
             with st.spinner("Criando a sequência perfeita..."):
                 plan = generate_marathon_plan(st.session_state['search_results'], st.session_state.get('current_query', ''))
                 st.markdown("### 🎬 Roteiro Sugerido")
@@ -322,7 +326,8 @@ if page == "🔍 Busca Rápida":
                 with c1:
                     if item['poster_path']: st.image(TMDB_IMAGE + item['poster_path'], use_container_width=True)
                     
-                    if st.button("🙈 Nunca Mais", key=f"hide_{item['id']}"):
+                    # TOOLTIP ADICIONADO AQUI
+                    if st.button("🙈 Nunca Mais", key=f"hide_{item['id']}", help="Bloqueia este título ETERNAMENTE. Ele nunca mais será recomendado para você."):
                         if username: save_block(username, item['id'], api_type)
                         st.session_state['session_ignore'].append(item['id'])
                         st.rerun()
@@ -347,8 +352,8 @@ if page == "🔍 Busca Rápida":
                     st.success(f"💡 {expl}")
                     
                     b1, b2 = st.columns(2)
-                    if item.get('trailer'): b1.link_button("▶️ Trailer", item['trailer'])
-                    if item.get('trakt_url'): b2.link_button("📝 Trakt", item['trakt_url'])
+                    if item.get('trailer'): b1.link_button("▶️ Trailer", item['trailer'], help="Assistir no YouTube")
+                    if item.get('trakt_url'): b2.link_button("📝 Trakt", item['trakt_url'], help="Marcar como visto no Trakt")
                     
                     with st.expander("Sinopse"): st.write(item['overview'])
                 st.divider()
@@ -363,9 +368,10 @@ elif page == "💎 Curadoria VIP":
         st.error("Login necessário (Barra Lateral).")
     else:
         dashboard = load_user_dashboard(username)
+        # TOOLTIP AQUI
         btn_text = "🔄 Atualizar Lista" if dashboard else "✨ Gerar Lista"
         
-        if st.button(btn_text):
+        if st.button(btn_text, help="Gera (ou renova) uma lista de 30 recomendações fixas que ficam salvas no seu perfil."):
             if 'trakt_data' not in st.session_state:
                 st.error("Sincronize o perfil primeiro!")
             else:
@@ -396,9 +402,9 @@ elif page == "💎 Curadoria VIP":
         if dashboard and dashboard.get('curated_list'):
             st.divider()
             
-            # --- FEATURE NOVA: EXPORTAR ---
+            # --- FEATURE NOVA: EXPORTAR (COM TOOLTIP) ---
             text_data = convert_list_to_text(dashboard['curated_list'], username)
-            st.download_button("📤 Baixar Lista (Para WhatsApp)", text_data, file_name="minha_curadoria.txt")
+            st.download_button("📤 Baixar Lista (Para WhatsApp)", text_data, file_name="minha_curadoria.txt", help="Baixa um arquivo de texto formatado com emojis para você compartilhar.")
             
             last_up = datetime.fromisoformat(dashboard['updated_at']).strftime('%d/%m %H:%M')
             st.caption(f"Atualizado em: {last_up}")
@@ -418,10 +424,8 @@ elif page == "💎 Curadoria VIP":
                         if item.get('providers_flat'):
                             p_cols = st.columns(len(item.get('providers_flat', [])))
                             for i, p in enumerate(item.get('providers_flat', [])):
-                                # CORREÇÃO DA INDENTAÇÃO AQUI TAMBÉM:
-                                if i < 4:
-                                    with p_cols[i]:
-                                        st.image(TMDB_LOGO + p['logo_path'], width=20)
+                                if i < 4: 
+                                    with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
                         with st.expander("Detalhes"):
                             st.write(item['overview'])
