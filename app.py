@@ -91,42 +91,43 @@ def get_watch_providers(movie_id, filter_providers=None):
 def explain_choice_solo(movie, favorites_list, user_query, overview):
     """Explica a escolha conectando pontos específicos"""
     
-    # 1. Limpeza de Dados
+    # 1. Limpeza de Dados (Garante que é texto, não lista)
     if isinstance(favorites_list, list):
-        favs_str = ", ".join(favorites_list[:5])
+        favs_str = ", ".join(favorites_list[:5]) # Pega top 5
     else:
         favs_str = str(favorites_list)
         
     if not favs_str: favs_str = "Cinema em geral"
 
     prompt = f"""
-    Atue como um curador de cinema técnico.
+    Atue como um curador de cinema técnico e perspicaz.
     
     DADOS:
     - O usuário ama: {favs_str}.
-    - O usuário pediu: "{user_query}".
+    - O usuário pediu EXATAMENTE: "{user_query}".
     - Filme Recomendado: "{movie}".
-    - Sinopse: "{overview}".
+    - Sinopse Técnica: "{overview}".
 
     TAREFA:
     Escreva uma justificativa de UMA frase explicando por que esse filme atende o pedido.
-    REGRA: Não seja genérico. Cite um elemento concreto (a fotografia, o diretor, o plot, a atmosfera) que conecta o filme ao pedido.
-    Comece com: "Porque..."
+    REGRA DE OURO: Não seja genérico. Cite um elemento concreto (a fotografia, o diretor, o plot twist, a atmosfera, o ritmo) que conecta o filme ao pedido.
+    Comece a frase com: "Porque..."
     """
     
     try:
-        # MUDANÇA AQUI: Trocamos 'gemini-1.5-flash' por 'gemini-pro' que é universal
+        # Desativa filtros de segurança para permitir sinopses de Crime/Terror
         safe = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
-        model = genai.GenerativeModel('gemini-pro', safety_settings=safe) 
+        # Usa o modelo Flash que é mais tolerante e rápido
+        model = genai.GenerativeModel('gemini-1.5-flash', safety_settings=safe)
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        return f"Erro técnico: {str(e)}"
+        return f"Erro ao explicar (Tente recarregar): {str(e)}"
 
 def explain_choice_couple(movie, persona_a, persona_b, overview):
     """Explica a escolha para o CASAL"""
@@ -138,8 +139,8 @@ def explain_choice_couple(movie, persona_a, persona_b, overview):
     Explique em UMA frase curta e divertida por que esse filme resolve o problema de escolher algo que os dois gostem.
     """
     try:
-        # MUDANÇA AQUI TAMBÉM: 'gemini-pro'
-        model = genai.GenerativeModel('gemini-pro')
+        # Flash também aqui para consistência
+        model = genai.GenerativeModel('gemini-1.5-flash')
         return model.generate_content(prompt).text.strip()
     except: return "Um ótimo meio termo para o casal."
 
@@ -152,6 +153,7 @@ st.markdown("**IA + Psicologia + Streaming**")
 with st.sidebar:
     st.header("⚙️ Configuração")
     
+    # IMPORTANTE: O texto precisa conter "Solo" para a lógica funcionar
     mode = st.radio("Modo de Uso", ["Solo (Só eu)", "Casal (Eu + Mozão)"])
     
     st.divider()
@@ -178,7 +180,7 @@ with st.sidebar:
             
             st.success("Sincronizado!")
 
-    # EXIBIÇÃO DE STATS (VOLTOU!)
+    # EXIBIÇÃO DE STATS
     if 'stats_a' in st.session_state and st.session_state['stats_a']:
         st.divider()
         stats = st.session_state['stats_a']
@@ -221,7 +223,7 @@ if mode == "Casal (Eu + Mozão)" and 'data_b' in st.session_state:
     blocked_ids += db['watched_ids'] # Bloqueia o que QUALQUER UM dos dois já viu
 
 # Input de Busca
-user_query = st.text_area("O que vamos assistir?", placeholder="Ex: Suspense curto..." if mode == "Solo" else "Ex: Algo que a gente não brigue pra escolher...")
+user_query = st.text_area("O que vamos assistir?", placeholder="Ex: Suspense curto..." if mode == "Solo (Só eu)" else "Ex: Algo que a gente não brigue pra escolher...")
 
 if st.button("🚀 Recomendar", type="primary"):
     if not user_query:
@@ -283,7 +285,8 @@ if st.button("🚀 Recomendar", type="primary"):
                             match_score = int(m['similarity']*100)
                             st.progress(match_score, text=f"Match: {match_score}%")
                             
-                            # Explicação Inteligente (REVISADA)
+                            # Explicação Inteligente (CORRIGIDO)
+                            # Verifica se a palavra "Solo" está no texto selecionado do radio button
                             if "Solo" in mode: 
                                 # Garante que favorites é uma lista antes de passar
                                 raw_favs = st.session_state.get('data_a', {}).get('favorites', [])
@@ -303,6 +306,3 @@ if st.button("🚀 Recomendar", type="primary"):
 
             except Exception as e:
                 st.error(f"Erro: {e}")
-
-
-
