@@ -25,7 +25,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 TMDB_LOGO = "https://image.tmdb.org/t/p/original"
 
-# === 2. SESSÃO E CACHE (PERFORMANCE) ===
+# === 2. SESSÃO E CACHE ===
 
 def get_session():
     session = requests.Session()
@@ -44,11 +44,13 @@ def get_trakt_profile_data(username, content_type="movies"):
     item_key = 'show' if content_type == "tv" else 'movie'
 
     try:
-        r_watched = session.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}", headers=headers)
+        # Pega IDs Vistos (Aumentei o limite para garantir que pegue tudo recente)
+        r_watched = session.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}?limit=1000", headers=headers)
         if r_watched.status_code == 200:
             data["watched_ids"] = [i[item_key]['ids']['tmdb'] for i in r_watched.json() if i[item_key]['ids'].get('tmdb')]
 
-        r_ratings = session.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=50", headers=headers)
+        # Pega Avaliações (Aumentei limite para 100 para ter mais base)
+        r_ratings = session.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=100", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
                 title = item[item_key]['title']
@@ -95,9 +97,9 @@ def get_trakt_url(content_id, content_type):
 def build_context_string(data):
     if not data: return ""
     c = ""
-    if data.get('loved'): c += f"AMOU (9-10): {', '.join(data['loved'][:10])}. "
-    if data.get('liked'): c += f"CURTIU (7-8): {', '.join(data['liked'][:5])}. "
-    if data.get('hated'): c += f"ODIOU/EVITAR (1-5): {', '.join(data['hated'][:10])}. "
+    if data.get('loved'): c += f"AMOU (9-10): {', '.join(data['loved'][:15])}. "
+    if data.get('liked'): c += f"CURTIU (7-8): {', '.join(data['liked'][:10])}. "
+    if data.get('hated'): c += f"ODIOU/EVITAR (1-5): {', '.join(data['hated'][:15])}. "
     return c
 
 def explain_choice(title, context_str, user_query, overview, rating):
@@ -114,7 +116,7 @@ def explain_choice(title, context_str, user_query, overview, rating):
         return model.generate_content(prompt).text.strip()
     except: return "Recomendação baseada no seu perfil."
 
-# === 3. LÓGICA HÍBRIDA & PARALELA (O CÉREBRO) ===
+# === 3. LÓGICA HÍBRIDA & PARALELA ===
 
 def calculate_hybrid_score(item):
     sim_score = float(item.get('similarity', 0))
@@ -122,8 +124,6 @@ def calculate_hybrid_score(item):
     rating_score = vote / 10.0
     pop = float(item.get('popularity', 0) or 0)
     pop_score = min(pop / 1000.0, 1.0)
-    
-    # 70% Semântica + 20% Nota + 10% Popularidade
     return (sim_score * 0.7) + (rating_score * 0.2) + (pop_score * 0.1)
 
 def process_single_item(item, api_type, my_services):
@@ -148,18 +148,17 @@ def process_single_item(item, api_type, my_services):
 
 def process_batch_parallel(items, api_type, my_services, limit=5):
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    # Usa max_workers=5 para evitar sobrecarga no free tier
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(process_single_item, item, api_type, my_services) for item in items]
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             if res:
                 results.append(res)
-                # Não paramos aqui para poder ordenar tudo depois
-    
     results.sort(key=lambda x: x['hybrid_score'], reverse=True)
     return results[:limit]
 
-# === 4. DASHBOARD E INTERFACE ===
+# === 4. PERSISTÊNCIA ===
 
 def load_user_dashboard(username):
     response = supabase.table("user_dashboards").select("*").eq("trakt_username", username).execute()
@@ -174,11 +173,23 @@ def save_user_dashboard(username, curated_list, prefs):
     }
     supabase.table("user_dashboards").upsert(data).execute()
 
-# --- SIDEBAR ---
+def save_block(username, content_id, content_type):
+    data = {"trakt_username": username, "content_id": content_id, "content_type": content_type, "action": "block"}
+    try: supabase.table("user_feedback").upsert(data, on_conflict="trakt_username, content_id").execute()
+    except: pass
+
+def get_user_blacklist(username, content_type):
+    try:
+        response = supabase.table("user_feedback").select("content_id").eq("trakt_username", username).eq("content_type", content_type).execute()
+        return [x['content_id'] for x in response.data]
+    except: return []
+
+# === 5. INTERFACE ===
+
 st.sidebar.title("🍿 CineGourmet")
 
 with st.sidebar:
-    st.header("⚙️ Configuração")
+    st.header("⚙️ 1. Configurações")
     c_type = st.radio("Conteúdo", ["Filmes 🎬", "Séries 📺"], horizontal=True)
     api_type = "tv" if "Séries" in c_type else "movie"
     db_func = "match_tv_shows" if "Séries" in c_type else "match_movies"
@@ -190,13 +201,16 @@ with st.sidebar:
         if username:
             with st.spinner("Baixando dados..."):
                 st.session_state['trakt_data'] = get_trakt_profile_data(username, api_type)
+                st.session_state['app_blacklist'] = get_user_blacklist(username, api_type)
                 st.success("Sincronizado!")
         else:
             st.warning("Digite um usuário.")
             
     if 'trakt_data' in st.session_state:
         d = st.session_state['trakt_data']
-        st.caption(f"✅ {len(d['loved'])} favoritos.")
+        # Mostra Loved e Total Vistos para confirmar leitura
+        st.caption(f"✅ {len(d['loved'])} favoritos (9-10).")
+        st.caption(f"👀 {len(d['watched_ids'])} itens já assistidos.")
     
     st.divider()
     st.subheader("📺 Meus Streamings")
@@ -214,40 +228,48 @@ if page == "🔍 Busca Rápida":
     st.title(f"🔍 Busca Turbo: {c_type}")
     
     context_str = ""
-    blocked_ids = []
+    full_blocked_ids = []
     if 'trakt_data' in st.session_state:
         context_str = build_context_string(st.session_state['trakt_data'])
-        blocked_ids = st.session_state['trakt_data']['watched_ids']
+        full_blocked_ids = st.session_state['trakt_data']['watched_ids'] + st.session_state.get('app_blacklist', [])
         st.info(f"🧠 Personalizado para **{username}**")
 
-    query = st.text_area("O que você quer ver?", placeholder="Ex: Suspense sci-fi...")
+    query = st.text_area("O que você quer ver?", placeholder="Deixe vazio para 'Surpreenda-me'...")
     
-    if st.button("🚀 Buscar"):
+    # Lógica do Botão Surpreenda-me
+    btn_label = "🎲 Surpreenda-me" if not query else "🚀 Buscar"
+    
+    if st.button(btn_label):
+        
+        # Define o prompt baseado se tem texto ou não
         if not query:
-            st.warning("Digite algo!")
+            if not context_str:
+                st.error("Para surpresas, preciso que você sincronize o Trakt primeiro!")
+                st.stop()
+            final_prompt = f"Analise este perfil: {context_str}. Recomende algo que ele vai AMAR baseado nas notas."
         else:
             final_prompt = f"Pedido: {query}. Contexto: {context_str}"
+        
+        with st.spinner("IA processando..."):
+            vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
             
-            with st.spinner("IA processando + Verificando Streamings em paralelo..."):
-                vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
-                
-                resp = supabase.rpc(db_func, {
-                    "query_embedding": vector, 
-                    "match_threshold": threshold, 
-                    "match_count": 60,
-                    "filter_ids": blocked_ids
-                }).execute()
-                
-                if resp.data:
-                    st.session_state['search_results'] = process_batch_parallel(resp.data, api_type, my_services, limit=8)
-                else:
-                    st.session_state['search_results'] = []
+            resp = supabase.rpc(db_func, {
+                "query_embedding": vector, 
+                "match_threshold": threshold, 
+                "match_count": 60,
+                "filter_ids": full_blocked_ids
+            }).execute()
+            
+            if resp.data:
+                st.session_state['search_results'] = process_batch_parallel(resp.data, api_type, my_services, limit=8)
+            else:
+                st.session_state['search_results'] = []
 
     if 'search_results' in st.session_state and st.session_state['search_results']:
         
-        if 'temp_blacklist' not in st.session_state: st.session_state['temp_blacklist'] = []
+        if 'session_ignore' not in st.session_state: st.session_state['session_ignore'] = []
         
-        visible_items = [i for i in st.session_state['search_results'] if i['id'] not in st.session_state['temp_blacklist']]
+        visible_items = [i for i in st.session_state['search_results'] if i['id'] not in st.session_state['session_ignore']]
         
         if not visible_items:
             st.warning("Todos os itens foram ocultados ou nada encontrado.")
@@ -257,8 +279,9 @@ if page == "🔍 Busca Rápida":
                 with c1:
                     if item['poster_path']: st.image(TMDB_IMAGE + item['poster_path'], use_container_width=True)
                     
-                    if st.button("🙈 Já vi / Ignorar", key=f"hide_{item['id']}"):
-                        st.session_state['temp_blacklist'].append(item['id'])
+                    if st.button("🙈 Nunca Mais", key=f"hide_{item['id']}"):
+                        if username: save_block(username, item['id'], api_type)
+                        st.session_state['session_ignore'].append(item['id'])
                         st.rerun()
 
                     if item.get('providers_flat'):
@@ -272,12 +295,14 @@ if page == "🔍 Busca Rápida":
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
                     hybrid = int(item.get('hybrid_score', 0) * 100)
+                    year = item.get('release_date', '')[:4] if item.get('release_date') else '????'
+                    if 'first_air_date' in item: year = item.get('first_air_date', '')[:4]
                     
-                    st.markdown(f"### {item['title']}")
+                    st.markdown(f"### {item['title']} ({year})")
                     st.caption(f"⭐ {rating:.1f}/10 | 🧠 CineScore: {hybrid}")
-                    st.progress(hybrid, text="Qualidade Geral (IA + Nota)")
+                    st.progress(hybrid, text="Qualidade Geral")
                     
-                    expl = explain_choice(item['title'], context_str if context_str else "Geral", query, item['overview'], rating)
+                    expl = explain_choice(item['title'], context_str if context_str else "Geral", query if query else "Surpresa", item['overview'], rating)
                     st.success(f"💡 {expl}")
                     
                     b1, b2 = st.columns(2)
@@ -305,7 +330,7 @@ elif page == "💎 Curadoria VIP":
             else:
                 with st.spinner("Gerando lista VIP..."):
                     context_str = build_context_string(st.session_state['trakt_data'])
-                    blocked_ids = st.session_state['trakt_data']['watched_ids']
+                    full_blocked_ids = st.session_state['trakt_data']['watched_ids'] + st.session_state.get('app_blacklist', [])
                     
                     prompt = f"Analise: {context_str}. Recomende 30 obras-primas OBRIGATÓRIAS (Hidden Gems, Cults) não vistas."
                     vector = genai.embed_content(model="models/text-embedding-004", content=prompt)['embedding']
@@ -314,7 +339,7 @@ elif page == "💎 Curadoria VIP":
                         "query_embedding": vector, 
                         "match_threshold": threshold, 
                         "match_count": 120, 
-                        "filter_ids": blocked_ids
+                        "filter_ids": full_blocked_ids
                     }).execute()
                     
                     final_list = []
