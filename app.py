@@ -27,7 +27,6 @@ TMDB_LOGO = "https://image.tmdb.org/t/p/original"
 
 # === SESSÃO COM RETRY (RESILIÊNCIA) ===
 def get_session():
-    """Cria uma sessão que tenta de novo se a internet falhar"""
     session = requests.Session()
     retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry)
@@ -38,7 +37,7 @@ session = get_session()
 
 # === FUNÇÕES COM CACHE (VELOCIDADE) ===
 
-@st.cache_data(ttl=3600) # Cache dura 1 hora
+@st.cache_data(ttl=3600)
 def get_trakt_profile_data(username, content_type="movies"):
     headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
     data = {"history": [], "loved": [], "liked": [], "hated": [], "watched_ids": []}
@@ -62,9 +61,8 @@ def get_trakt_profile_data(username, content_type="movies"):
     except: pass
     return data
 
-@st.cache_data(ttl=86400) # Cache de 24h (Streaming muda pouco)
+@st.cache_data(ttl=86400)
 def get_watch_providers(content_id, content_type):
-    """Busca providers (Sem filtrar ainda)"""
     url = f"https://api.themoviedb.org/3/{content_type}/{content_id}/watch/providers?api_key={TMDB_API_KEY}"
     try:
         r = session.get(url, timeout=5)
@@ -75,7 +73,7 @@ def get_watch_providers(content_id, content_type):
     except: pass
     return False, [], []
 
-@st.cache_data(ttl=86400) # Cache de 24h
+@st.cache_data(ttl=86400)
 def get_trailer_url(content_id, content_type):
     url = f"https://api.themoviedb.org/3/{content_type}/{content_id}/videos?api_key={TMDB_API_KEY}&language=pt-BR"
     try:
@@ -84,8 +82,6 @@ def get_trailer_url(content_id, content_type):
         if 'results' in data:
             for v in data['results']:
                 if v['site'] == 'YouTube' and v['type'] == 'Trailer': return f"https://www.youtube.com/watch?v={v['key']}"
-            
-            # Fallback EN
             url_en = f"https://api.themoviedb.org/3/{content_type}/{content_id}/videos?api_key={TMDB_API_KEY}&language=en-US"
             r_en = session.get(url_en)
             for v in r_en.json().get('results', []):
@@ -105,7 +101,6 @@ def build_context_string(data):
     if data.get('hated'): c += f"ODIOU/EVITAR (1-5): {', '.join(data['hated'][:10])}. "
     return c
 
-# Não cacheamos a explicação para ela ser sempre criativa
 def explain_choice(title, context_str, user_query, overview, rating):
     prompt = f"""
     Atue como crítico de cinema.
@@ -120,20 +115,18 @@ def explain_choice(title, context_str, user_query, overview, rating):
         return model.generate_content(prompt).text.strip()
     except: return "Recomendação baseada no seu perfil."
 
-# === PARALELISMO (A MÁGICA DA VELOCIDADE) ===
+# === PARALELISMO ===
 
 def process_single_item(item, api_type, my_services):
-    """Processa 1 item: verifica streaming e pega trailer"""
     is_ok, flat, rent = get_watch_providers(item['id'], api_type)
     
-    # Filtro de Serviço
     has_service = False
     if my_services:
         avail_names = [p['provider_name'] for p in flat]
         has_service = any(s in avail_names for s in my_services)
-        if not has_service and not rent: return None # Não tem onde ver
+        if not has_service and not rent: return None
     else:
-        has_service = True # Se não selecionou serviços, mostra tudo
+        has_service = True
     
     if has_service or rent:
         item['providers_flat'] = flat
@@ -144,13 +137,9 @@ def process_single_item(item, api_type, my_services):
     return None
 
 def process_batch_parallel(items, api_type, my_services, limit=5):
-    """Processa vários itens ao mesmo tempo"""
     results = []
-    # Usa ThreadPool para fazer até 10 requisições simultâneas
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        # Manda todo mundo trabalhar
         futures = [executor.submit(process_single_item, item, api_type, my_services) for item in items]
-        
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             if res:
@@ -158,12 +147,10 @@ def process_batch_parallel(items, api_type, my_services, limit=5):
                 if len(results) >= limit: 
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
-    
-    # Reordena por match (pois o paralelo pode embaralhar)
     results.sort(key=lambda x: x['similarity'], reverse=True)
     return results
 
-# === FUNÇÕES DE DASHBOARD ===
+# === DASHBOARD ===
 
 def load_user_dashboard(username):
     response = supabase.table("user_dashboards").select("*").eq("trakt_username", username).execute()
@@ -213,7 +200,7 @@ page = st.radio("Modo", ["🔍 Busca Rápida", "💎 Curadoria VIP"], horizontal
 st.divider()
 
 # ==============================================================================
-# PÁGINA 1: BUSCA RÁPIDA (TURBINADA)
+# PÁGINA 1: BUSCA RÁPIDA
 # ==============================================================================
 if page == "🔍 Busca Rápida":
     st.title(f"🔍 Busca Turbo: {c_type}")
@@ -234,10 +221,8 @@ if page == "🔍 Busca Rápida":
             final_prompt = f"Pedido: {query}. Contexto: {context_str}"
             
             with st.spinner("IA processando + Verificando Streamings em paralelo..."):
-                # 1. Embedding
                 vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
                 
-                # 2. Busca SQL (Traz 60 candidatos)
                 resp = supabase.rpc(db_func, {
                     "query_embedding": vector, 
                     "match_threshold": threshold, 
@@ -245,7 +230,6 @@ if page == "🔍 Busca Rápida":
                     "filter_ids": blocked_ids
                 }).execute()
                 
-                # 3. Processamento Paralelo (Turbo)
                 results = []
                 if resp.data:
                     results = process_batch_parallel(resp.data, api_type, my_services, limit=5)
@@ -257,10 +241,14 @@ if page == "🔍 Busca Rápida":
                         c1, c2 = st.columns([1, 4])
                         with c1:
                             if item['poster_path']: st.image(TMDB_IMAGE + item['poster_path'], use_container_width=True)
+                            
+                            # === CORREÇÃO DO ERRO AQUI ===
                             if item.get('providers_flat'):
                                 cols = st.columns(len(item['providers_flat']))
                                 for i, p in enumerate(item['providers_flat']):
-                                    if i<4: with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                                    if i < 4:
+                                        with cols[i]:
+                                            st.image(TMDB_LOGO + p['logo_path'], width=25)
                         
                         with c2:
                             rating = float(item.get('vote_average', 0) or 0)
@@ -306,13 +294,12 @@ elif page == "💎 Curadoria VIP":
                     resp = supabase.rpc(db_func, {
                         "query_embedding": vector, 
                         "match_threshold": threshold, 
-                        "match_count": 120, # Pega MUITOS
+                        "match_count": 120,
                         "filter_ids": blocked_ids
                     }).execute()
                     
                     final_list = []
                     if resp.data:
-                        # Aqui usamos o paralelo para processar 120 itens rápido!
                         final_list = process_batch_parallel(resp.data, api_type, my_services, limit=30)
                     
                     if final_list:
@@ -336,10 +323,13 @@ elif page == "💎 Curadoria VIP":
                         rating = float(item.get('vote_average', 0) or 0)
                         st.caption(f"{rating:.1f}/10 ⭐")
                         
+                        # === CORREÇÃO DO ERRO AQUI TAMBÉM ===
                         if item.get('providers_flat'):
                             p_cols = st.columns(len(item['providers_flat']))
                             for i, p in enumerate(item['providers_flat']):
-                                if i<4: with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
+                                if i < 4:
+                                    with p_cols[i]:
+                                        st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
                         with st.expander("Detalhes"):
                             st.write(item['overview'])
