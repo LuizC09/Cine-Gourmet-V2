@@ -270,11 +270,15 @@ if page == "🔍 Busca Rápida":
     btn_label = "🎲 Surpreenda-me" if not query else "🚀 Buscar"
     
     if st.button(btn_label):
-        if not query and not context_str:
-            st.error("Para surpresas, preciso que você sincronize o Trakt primeiro!")
-            st.stop()
-            
-        final_prompt = f"Pedido: {query}. Contexto: {context_str}" if query else f"Analise: {context_str}. Recomende algo que ele vai AMAR."
+        
+        # Define o prompt baseado se tem texto ou não
+        if not query:
+            if not context_str:
+                st.error("Para surpresas, preciso que você sincronize o Trakt primeiro!")
+                st.stop()
+            final_prompt = f"Analise este perfil: {context_str}. Recomende algo que ele vai AMAR baseado nas notas."
+        else:
+            final_prompt = f"Pedido: {query}. Contexto: {context_str}"
         
         with st.spinner("IA processando..."):
             vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
@@ -325,7 +329,8 @@ if page == "🔍 Busca Rápida":
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
                             if i < 4:
-                                with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                                with cols[i]:
+                                    st.image(TMDB_LOGO + p['logo_path'], width=25)
                 
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
@@ -412,7 +417,10 @@ elif page == "💎 Curadoria VIP":
                         if item.get('providers_flat'):
                             p_cols = st.columns(len(item.get('providers_flat', [])))
                             for i, p in enumerate(item.get('providers_flat', [])):
-                                if i < 4: with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
+                                # CORREÇÃO DA INDENTAÇÃO AQUI TAMBÉM:
+                                if i < 4:
+                                    with p_cols[i]:
+                                        st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
                         with st.expander("Detalhes"):
                             st.write(item['overview'])
