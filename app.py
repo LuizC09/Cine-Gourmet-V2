@@ -12,7 +12,7 @@ try:
     TRAKT_CLIENT_ID = st.secrets["TRAKT_CLIENT_ID"]
     TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
 except:
-    st.error("🚨 Configure os Secrets no Streamlit!")
+    st.error("🚨 Configure os Secrets no Streamlit! (Falta TMDB_API_KEY ou outros)")
     st.stop()
 
 genai.configure(api_key=GOOGLE_API_KEY)
@@ -26,7 +26,6 @@ TMDB_LOGO = "https://image.tmdb.org/t/p/original"
 def get_trakt_profile_data(username, content_type="movies"):
     """
     Baixa avaliações e separa o que o usuário AMOU do que ele ODIOU.
-    Isso cria um perfil muito mais preciso.
     """
     headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
     data = {"history": [], "loved": [], "liked": [], "hated": [], "watched_ids": []}
@@ -45,8 +44,7 @@ def get_trakt_profile_data(username, content_type="movies"):
         if r_hist.status_code == 200:
             data["history"] = [i[item_key]['title'] for i in r_hist.json()]
 
-        # 3. AVALIAÇÕES (O Pulo do Gato: Ponderar Nota)
-        # Baixa as últimas 50 avaliações
+        # 3. AVALIAÇÕES (Ponderar Nota)
         r_ratings = requests.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=50", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
@@ -61,7 +59,6 @@ def get_trakt_profile_data(username, content_type="movies"):
                     data["hated"].append(f"{title} ({rating}/10)")
 
     except Exception as e:
-        print(f"Erro Trakt: {e}")
         pass
         
     return data
@@ -84,6 +81,34 @@ def get_watch_providers(content_id, content_type, filter_providers=None):
             return True, flatrate, rent
     except: pass
     return False, [], []
+
+def get_trailer_url(content_id, content_type):
+    """Busca o trailer no YouTube via TMDB"""
+    url = f"https://api.themoviedb.org/3/{content_type}/{content_id}/videos?api_key={TMDB_API_KEY}&language=pt-BR"
+    try:
+        r = requests.get(url)
+        data = r.json()
+        # Tenta achar trailer dublado ou legendado em PT
+        if 'results' in data:
+            for v in data['results']:
+                if v['site'] == 'YouTube' and v['type'] == 'Trailer':
+                    return f"https://www.youtube.com/watch?v={v['key']}"
+            
+            # Se não achar em PT, tenta em Inglês (fallback)
+            url_en = f"https://api.themoviedb.org/3/{content_type}/{content_id}/videos?api_key={TMDB_API_KEY}&language=en-US"
+            r_en = requests.get(url_en)
+            data_en = r_en.json()
+            for v in data_en.get('results', []):
+                if v['site'] == 'YouTube' and v['type'] == 'Trailer':
+                    return f"https://www.youtube.com/watch?v={v['key']}"
+    except: pass
+    return None
+
+def get_trakt_url(content_id, content_type):
+    """Gera o link para a página do Trakt"""
+    type_slug = "movie" if content_type == "movie" else "show"
+    # Link de busca direta pelo ID é mais seguro
+    return f"https://trakt.tv/search/tmdb/{content_id}?id_type={type_slug}"
 
 def explain_choice(title, context_str, user_query, overview, rating):
     prompt = f"""
@@ -113,22 +138,22 @@ st.title("🍿 CineGourmet Ultimate")
 with st.sidebar:
     st.header("⚙️ Configuração")
     
-    # Tipo de Conteúdo
-    content_type = st.radio("O que vamos ver?", ["Filmes 🎬", "Séries 📺"])
-    is_tv = "Séries" in content_type
+    # 1. ESCOLHA O TIPO
+    content_type_label = st.radio("O que vamos ver?", ["Filmes 🎬", "Séries 📺"])
+    is_tv = "Séries" in content_type_label
     api_type = "tv" if is_tv else "movie"
     db_func = "match_tv_shows" if is_tv else "match_movies"
     
     st.divider()
     
-    # Modo
+    # 2. MODO CASAL/SOLO
     mode = st.radio("Modo", ["Solo", "Casal"])
     
     user_a = st.text_input("Seu Trakt User", key="user_a")
     user_b = None if mode == "Solo" else st.text_input("Parceiro(a)", key="user_b")
     
     if st.button("🔄 Sincronizar (Ler Notas)"):
-        with st.spinner("Analisando suas notas no Trakt..."):
+        with st.spinner("Analisando notas no Trakt..."):
             if user_a: st.session_state['data_a'] = get_trakt_profile_data(user_a, api_type)
             if user_b: st.session_state['data_b'] = get_trakt_profile_data(user_b, api_type)
             st.success("Perfil atualizado com suas notas!")
@@ -233,6 +258,16 @@ if st.button(btn_label, type="primary"):
                         # Explicação com a Nota
                         expl = explain_choice(item['title'], context if context else "Geral", query_display, item['overview'], rating)
                         st.info(f"💡 {expl}")
+                        
+                        # BOTÕES DE AÇÃO (TRAILER E TRAKT)
+                        col_btn1, col_btn2 = st.columns(2)
+                        
+                        trailer_url = get_trailer_url(item['id'], api_type)
+                        if trailer_url:
+                            with col_btn1: st.link_button("▶️ Trailer", trailer_url)
+                        
+                        trakt_link = get_trakt_url(item['id'], api_type)
+                        with col_btn2: st.link_button("📝 Trakt", trakt_link)
                         
                         with st.expander("Sinopse"): st.write(item['overview'])
                     
