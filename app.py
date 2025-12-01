@@ -22,7 +22,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 TMDB_LOGO = "https://image.tmdb.org/t/p/original"
 
-# === FUNÇÕES DE DADOS ===
+# === FUNÇÕES DE DADOS (TRAKT & TMDB) ===
 
 def get_trakt_stats(username):
     headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
@@ -72,14 +72,14 @@ def explain_choice_solo(movie, favorites_list, user_query, overview):
     if not favs_str: favs_str = "Cinema em geral"
 
     prompt = f"""
-    Atue como um curador de cinema técnico.
+    Atue como um curador de cinema técnico e perspicaz.
     DADOS: Usuário ama: {favs_str}. Pediu: "{user_query}". Recomendação: "{movie}". Sinopse: "{overview}".
     TAREFA: Escreva uma frase explicando por que esse filme atende o pedido. Cite um elemento concreto (direção, roteiro, clima).
     Comece com: "Porque..."
     """
     try:
-        # TENTATIVA 1: Modelo Padrão (Pro)
-        model = genai.GenerativeModel('gemini-pro')
+        # USA O MODELO 2.0 FLASH DA SUA LISTA
+        model = genai.GenerativeModel('models/gemini-2.0-flash')
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
@@ -91,28 +91,20 @@ def explain_choice_couple(movie, persona_a, persona_b, overview):
     Explique em uma frase por que esse filme agrada os dois.
     """
     try:
-        model = genai.GenerativeModel('gemini-pro')
+        # USA O MODELO 2.0 FLASH DA SUA LISTA
+        model = genai.GenerativeModel('models/gemini-2.0-flash')
         return model.generate_content(prompt).text.strip()
     except: return "Um ótimo meio termo."
 
 # === INTERFACE ===
 
 st.title("🍿 CineGourmet Ultimate")
+st.caption("Powered by Gemini 2.0 Flash")
 
 with st.sidebar:
     st.header("⚙️ Configuração")
     
-    # DEBUGGER (PARA DESCOBRIR O QUE ESTÁ ACONTECENDO)
-    if st.checkbox("🐞 Ver Modelos Disponíveis (Debug)"):
-        st.info("O servidor do Streamlit está vendo estes modelos:")
-        try:
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    st.code(m.name)
-        except Exception as e:
-            st.error(f"Erro ao listar modelos: {e}")
-            st.caption("Se der erro aqui, a biblioteca google-generativeai está desatualizada.")
-
+    # Texto exato para o IF funcionar
     mode = st.radio("Modo de Uso", ["Solo (Só eu)", "Casal (Eu + Mozão)"])
     st.divider()
     
