@@ -44,10 +44,12 @@ def get_trakt_profile_data(username, content_type="movies"):
     item_key = 'show' if content_type == "tv" else 'movie'
 
     try:
+        # Pega IDs Vistos (Aumentei o limite para garantir que pegue tudo recente)
         r_watched = session.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}?limit=1000", headers=headers)
         if r_watched.status_code == 200:
             data["watched_ids"] = [i[item_key]['ids']['tmdb'] for i in r_watched.json() if i[item_key]['ids'].get('tmdb')]
 
+        # Pega Avaliações (Aumentei limite para 100 para ter mais base)
         r_ratings = session.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=100", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
@@ -329,8 +331,7 @@ if page == "🔍 Busca Rápida":
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
                             if i < 4:
-                                with cols[i]:
-                                    st.image(TMDB_LOGO + p['logo_path'], width=25)
+                                with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
                 
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
