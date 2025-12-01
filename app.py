@@ -23,19 +23,29 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 TMDB_LOGO = "https://image.tmdb.org/t/p/original"
 
-# === FUNÇÕES DE SUPORTE (TRAKT, TMDB, ETC) ===
-# (Mantivemos as mesmas funções de antes, mas organizadas)
+# === FUNÇÕES DE INTEGRAÇÃO (Backend) ===
 
 def get_trakt_profile_data(username, content_type="movies"):
+    """Baixa perfil profundo: Histórico + Notas (Loved/Hated)"""
     headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
     data = {"history": [], "loved": [], "liked": [], "hated": [], "watched_ids": []}
+    
     t_type = "shows" if content_type == "tv" else "movies"
     item_key = 'show' if content_type == "tv" else 'movie'
+
     try:
+        # 1. Watched IDs
         r_watched = requests.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}", headers=headers)
         if r_watched.status_code == 200:
             data["watched_ids"] = [i[item_key]['ids']['tmdb'] for i in r_watched.json() if i[item_key]['ids'].get('tmdb')]
-        r_ratings = requests.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=100", headers=headers) # Pegando mais ratings
+
+        # 2. Histórico
+        r_hist = requests.get(f"https://api.trakt.tv/users/{username}/history/{t_type}?limit=10", headers=headers)
+        if r_hist.status_code == 200:
+            data["history"] = [i[item_key]['title'] for i in r_hist.json()]
+
+        # 3. Ratings (Notas)
+        r_ratings = requests.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=50", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
                 title = item[item_key]['title']
@@ -85,23 +95,34 @@ def get_trakt_url(content_id, content_type):
     return f"https://trakt.tv/search/tmdb/{content_id}?id_type={type_slug}"
 
 def build_context_string(data):
+    if not data: return ""
     c = ""
-    if data['loved']: c += f"AMOU (9-10): {', '.join(data['loved'][:15])}. "
-    if data['liked']: c += f"CURTIU (7-8): {', '.join(data['liked'][:10])}. "
-    if data['hated']: c += f"ODIOU (1-5): {', '.join(data['hated'][:15])}. "
+    if data.get('loved'): c += f"AMOU (9-10): {', '.join(data['loved'][:15])}. "
+    if data.get('liked'): c += f"CURTIU (7-8): {', '.join(data['liked'][:10])}. "
+    if data.get('hated'): c += f"ODIOU (1-5): {', '.join(data['hated'][:15])}. "
     return c
 
-# === FUNÇÕES DE DASHBOARD (NOVAS) ===
+def explain_choice(title, context_str, user_query, overview, rating):
+    prompt = f"""
+    Atue como um crítico de cinema.
+    PERFIL: {context_str}
+    PEDIDO: "{user_query}"
+    RECOMENDAÇÃO: "{title}" (Nota: {rating}/10).
+    SINOPSE: {overview}
+    TAREFA: Em UMA frase, explique por que essa obra encaixa no perfil e no pedido.
+    """
+    try:
+        model = genai.GenerativeModel('models/gemini-2.0-flash')
+        return model.generate_content(prompt).text.strip()
+    except: return "Recomendação baseada no seu perfil."
+
+# === FUNÇÕES DE PERSISTÊNCIA (DASHBOARD) ===
 
 def load_user_dashboard(username):
-    """Carrega a lista salva do Supabase"""
     response = supabase.table("user_dashboards").select("*").eq("trakt_username", username).execute()
-    if response.data:
-        return response.data[0]
-    return None
+    return response.data[0] if response.data else None
 
 def save_user_dashboard(username, curated_list, prefs):
-    """Salva a lista gerada no Supabase"""
     data = {
         "trakt_username": username,
         "curated_list": curated_list,
@@ -110,190 +131,201 @@ def save_user_dashboard(username, curated_list, prefs):
     }
     supabase.table("user_dashboards").upsert(data).execute()
 
-def generate_curated_list(username, content_type, providers, threshold):
-    """Gera a lista pesada de 30 itens"""
-    
-    # 1. Analisa Perfil
-    api_type = "tv" if content_type == "tv" else "movie"
-    db_func = "match_tv_shows" if content_type == "tv" else "match_movies"
-    
-    profile = get_trakt_profile_data(username, api_type)
-    if not profile['loved'] and not profile['liked']:
-        return None, "Perfil Trakt sem dados suficientes (notas/histórico)."
-    
-    context = build_context_string(profile)
-    
-    # 2. Prompt Especialista
-    prompt = f"""
-    Analise este perfil de espectador PROFUNDAMENTE:
-    {context}
-    
-    Identifique os padrões sutis (diretores, ritmo, temas).
-    Eu preciso encontrar OBRAS-PRIMAS que ele ainda não viu.
-    Foque em "Hidden Gems" (Jóias Ocultas) e clássicos cult que combinam com o gosto dele.
-    Evite o óbvio.
-    """
-    
-    # 3. Embedding
-    vector = genai.embed_content(model="models/text-embedding-004", content=prompt)['embedding']
-    
-    # 4. Busca no Banco (Buscamos 100 para filtrar e sobrar 30 bons)
-    response = supabase.rpc(db_func, {
-        "query_embedding": vector,
-        "match_threshold": threshold, 
-        "match_count": 80, # Busca bastante para ter margem
-        "filter_ids": profile['watched_ids']
-    }).execute()
-    
-    final_list = []
-    
-    # 5. Filtragem
-    if response.data:
-        for item in response.data:
-            if len(final_list) >= 30: break # Meta: 30 itens
-            
-            is_ok, flat, rent = get_watch_providers(item['id'], api_type, providers)
-            
-            if is_ok: # Se passou no filtro de streaming (ou se não tiver filtro)
-                # Enriquecendo o item para salvar no JSON
-                item['providers_flat'] = flat
-                item['providers_rent'] = rent
-                item['trailer'] = get_trailer_url(item['id'], api_type)
-                item['trakt_url'] = get_trakt_url(item['id'], api_type)
-                final_list.append(item)
-    
-    return final_list, "Sucesso"
-
 # === INTERFACE ===
 
 st.sidebar.title("🍿 CineGourmet")
-page = st.sidebar.radio("Navegação", ["🔍 Busca Rápida", "💎 Minha Curadoria VIP"])
 
-# ==============================================================================
-# PÁGINA 1: BUSCA RÁPIDA (O código antigo, simplificado para caber aqui)
-# ==============================================================================
-if page == "🔍 Busca Rápida":
-    st.title("🔍 Busca Instantânea")
+# --- SIDEBAR GLOBAL (Configurações valem para as duas abas) ---
+with st.sidebar:
+    st.header("1. Configurações")
     
-    # Config rápida
-    c_type = st.radio("Tipo", ["Filmes", "Séries"], horizontal=True)
+    # Tipo de Conteúdo Global
+    c_type = st.radio("Tipo de Conteúdo", ["Filmes", "Séries"], horizontal=True)
     api_type = "tv" if c_type == "Séries" else "movie"
     db_func = "match_tv_shows" if c_type == "Séries" else "match_movies"
     
-    query = st.text_area("O que você quer ver agora?", placeholder="Ex: Terror psicológico anos 90...")
+    # Trakt Login Global
+    st.markdown("---")
+    username = st.text_input("Usuário Trakt (Login):", placeholder="ex: lscastro")
     
-    if st.button("Buscar Agora"):
+    if st.button("🔄 Sincronizar Perfil"):
+        if username:
+            with st.spinner("Baixando dados do Trakt..."):
+                # Carrega no Session State para usar em todo o app
+                st.session_state['trakt_data'] = get_trakt_profile_data(username, api_type)
+                st.success("Perfil Carregado!")
+        else:
+            st.warning("Digite um usuário.")
+            
+    # Mostra status do perfil
+    if 'trakt_data' in st.session_state:
+        d = st.session_state['trakt_data']
+        st.caption(f"✅ Perfil Ativo: {len(d['loved'])} amados, {len(d['watched_ids'])} vistos.")
+    
+    st.markdown("---")
+    st.subheader("📺 Meus Streamings")
+    services_list = ["Netflix", "Amazon Prime Video", "Disney Plus", "Max", "Apple TV Plus", "Globoplay"]
+    my_services = st.multiselect("O que você assina?", services_list, default=services_list)
+    threshold = st.slider("Ousadia", 0.0, 1.0, 0.45)
+
+# Navegação entre Abas
+page = st.radio("Modo de Navegação", ["🔍 Busca Rápida (Chat)", "💎 Minha Curadoria Fixa (30)"], horizontal=True, label_visibility="collapsed")
+st.divider()
+
+# ==============================================================================
+# PÁGINA 1: BUSCA RÁPIDA (INTEGRADA COM TRAKT)
+# ==============================================================================
+if page == "🔍 Busca Rápida (Chat)":
+    st.title(f"🔍 Busca Inteligente: {c_type}")
+    
+    # Verifica contexto
+    context_str = ""
+    blocked_ids = []
+    
+    if 'trakt_data' in st.session_state:
+        context_str = build_context_string(st.session_state['trakt_data'])
+        blocked_ids = st.session_state['trakt_data']['watched_ids']
+        st.info(f"🧠 Modo Personalizado Ativo: Usando o gosto de **{username}** para filtrar resultados.")
+    else:
+        st.warning("⚠️ Modo Genérico: Sincronize o Trakt na barra lateral para recomendações personalizadas.")
+
+    query = st.text_area("O que você quer ver agora?", placeholder="Ex: Sci-fi cyberpunk com final triste...")
+    
+    if st.button("🚀 Buscar", type="primary"):
         if not query:
             st.warning("Digite algo!")
         else:
-            with st.spinner("Buscando..."):
-                vector = genai.embed_content(model="models/text-embedding-004", content=query)['embedding']
-                resp = supabase.rpc(db_func, {"query_embedding": vector, "match_threshold": 0.45, "match_count": 10}).execute()
+            final_prompt = f"Pedido: {query}. Contexto do Usuário: {context_str}"
+            
+            with st.spinner("A IA está pensando..."):
+                # 1. Embed
+                vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
                 
+                # 2. Busca (Filtrando assistidos)
+                resp = supabase.rpc(db_func, {
+                    "query_embedding": vector, 
+                    "match_threshold": threshold, 
+                    "match_count": 50, # Margem para filtro
+                    "filter_ids": blocked_ids
+                }).execute()
+                
+                results = []
+                # 3. Filtro Streaming
                 if resp.data:
                     for m in resp.data:
-                        c1, c2 = st.columns([1,4])
-                        with c1: 
-                            if m['poster_path']: st.image(TMDB_IMAGE + m['poster_path'])
+                        if len(results) >= 5: break
+                        is_ok, flat, rent = get_watch_providers(m['id'], api_type, my_services)
+                        if is_ok:
+                            m['providers'] = flat
+                            m['rent'] = rent
+                            results.append(m)
+                
+                # 4. Exibição
+                if not results:
+                    st.error("Nada encontrado nos seus streamings/critérios.")
+                else:
+                    for item in results:
+                        c1, c2 = st.columns([1, 4])
+                        with c1:
+                            if item['poster_path']: st.image(TMDB_IMAGE + item['poster_path'], use_container_width=True)
+                            if item.get('providers'):
+                                cols = st.columns(len(item['providers']))
+                                for i, p in enumerate(item['providers']):
+                                    with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=30)
+                        
                         with c2:
-                            st.subheader(m['title'])
-                            st.write(m['overview'])
-                            # Trailer rapidinho
-                            trailer = get_trailer_url(m['id'], api_type)
-                            if trailer: st.link_button("Trailer", trailer)
+                            rating = float(item.get('vote_average', 0) or 0)
+                            stars = "⭐" * int(round(rating/2))
+                            st.markdown(f"### {item['title']} | {rating:.1f}/10 {stars}")
+                            
+                            match = int(item['similarity']*100)
+                            st.progress(match, text=f"Match: {match}%")
+                            
+                            # Explicação usando o perfil
+                            expl = explain_choice(item['title'], context_str if context_str else "Geral", query, item['overview'], rating)
+                            st.success(f"💡 {expl}")
+                            
+                            # Botões
+                            b1, b2 = st.columns(2)
+                            trailer = get_trailer_url(item['id'], api_type)
+                            if trailer: b1.link_button("▶️ Trailer", trailer)
+                            b2.link_button("📝 Trakt", get_trakt_url(item['id'], api_type))
+                            
+                            with st.expander("Sinopse"): st.write(item['overview'])
                         st.divider()
 
 # ==============================================================================
-# PÁGINA 2: CURADORIA VIP (O NOVO RECURSO)
+# PÁGINA 2: CURADORIA VIP (PERSISTENTE)
 # ==============================================================================
-elif page == "💎 Minha Curadoria VIP":
-    st.title("💎 Sua Curadoria Personalizada")
-    st.markdown("Uma lista de 30 recomendações feita sob medida e **salva** para você.")
+elif page == "💎 Minha Curadoria Fixa (30)":
+    st.title(f"💎 Curadoria VIP: {c_type}")
     
-    # LOGIN VIRTUAL
-    username = st.text_input("Digite seu Usuário Trakt para entrar:", placeholder="ex: lscastro")
-    
-    if username:
-        # Carrega dados salvos
+    if not username:
+        st.error("Por favor, digite seu Usuário Trakt na barra lateral para acessar sua lista.")
+    else:
+        # Carrega Dashboard
         dashboard = load_user_dashboard(username)
         
-        if dashboard:
-            last_update = datetime.fromisoformat(dashboard['updated_at']).strftime("%d/%m/%Y às %H:%M")
-            st.success(f"Bem-vindo de volta, **{username}**! Lista atualizada em: {last_update}")
-        else:
-            st.info(f"Olá **{username}**. Você ainda não tem uma lista gerada.")
-
-        # CONFIGURAÇÕES DA LISTA
-        with st.expander("⚙️ Configurar Critérios da Lista", expanded=not dashboard):
-            col1, col2 = st.columns(2)
-            with col1:
-                pref_type = st.radio("Prefiro receber:", ["Filmes", "Séries"], key="vip_type")
-            with col2:
-                services = ["Netflix", "Amazon Prime Video", "Disney Plus", "Max", "Apple TV Plus", "Globoplay"]
-                pref_services = st.multiselect("Tenho acesso a:", services, default=services, key="vip_services")
-            
-            pref_threshold = st.slider("Nível de Ousadia (Curadoria)", 0.0, 1.0, 0.45, key="vip_thresh")
-
-        # BOTÃO DE GERAR/ATUALIZAR
-        btn_text = "🔄 Atualizar Minha Lista" if dashboard else "✨ Gerar Primeira Lista"
+        # Botão de Gerar/Atualizar
+        btn_text = "🔄 Atualizar Lista" if dashboard else "✨ Gerar Lista VIP"
+        if st.button(btn_text):
+            if 'trakt_data' not in st.session_state:
+                st.error("Sincronize o perfil na barra lateral primeiro!")
+            else:
+                with st.spinner("Gerando 30 recomendações baseadas no seu DNA..."):
+                    context_str = build_context_string(st.session_state['trakt_data'])
+                    blocked_ids = st.session_state['trakt_data']['watched_ids']
+                    
+                    prompt = f"Analise este perfil: {context_str}. Encontre 30 obras-primas OBRIGATÓRIAS (Hidden Gems, Cults, Alta Nota) que ele AINDA NÃO VIU."
+                    vector = genai.embed_content(model="models/text-embedding-004", content=prompt)['embedding']
+                    
+                    resp = supabase.rpc(db_func, {
+                        "query_embedding": vector, 
+                        "match_threshold": threshold, 
+                        "match_count": 100,
+                        "filter_ids": blocked_ids
+                    }).execute()
+                    
+                    final_list = []
+                    if resp.data:
+                        for m in resp.data:
+                            if len(final_list) >= 30: break
+                            is_ok, flat, rent = get_watch_providers(m['id'], api_type, my_services)
+                            if is_ok:
+                                m['providers_flat'] = flat
+                                m['trailer'] = get_trailer_url(m['id'], api_type)
+                                m['trakt_url'] = get_trakt_url(m['id'], api_type)
+                                final_list.append(m)
+                    
+                    if final_list:
+                        save_user_dashboard(username, final_list, {"type": c_type})
+                        st.rerun()
         
-        if st.button(btn_text, type="primary"):
-            with st.spinner("⏳ Analisando seu perfil profundo, notas, histórico e calculando 30 recomendações... (Isso leva uns 15 segs)"):
-                
-                api_type_code = "tv" if pref_type == "Séries" else "movie"
-                
-                new_list, status = generate_curated_list(username, api_type_code, pref_services, pref_threshold)
-                
-                if new_list:
-                    save_user_dashboard(username, new_list, {"type": pref_type, "services": pref_services})
-                    st.toast("Lista Salva com Sucesso!", icon="💾")
-                    st.rerun() # Recarrega a página para mostrar a lista nova
-                else:
-                    st.error(f"Erro: {status}")
-
-        # EXIBIÇÃO DA LISTA (GRID)
+        # Exibição da Grade
         if dashboard and dashboard.get('curated_list'):
             st.divider()
-            st.subheader(f"Top 30 {dashboard['preferences']['type']} para Você")
+            st.caption(f"Última atualização: {datetime.fromisoformat(dashboard['updated_at']).strftime('%d/%m %H:%M')}")
             
-            # Grid de 3 colunas
             items = dashboard['curated_list']
+            # Filtra tipo se o usuário mudou na sidebar (opcional, mas bom pra UI)
+            # Mas a lista salva tem um tipo fixo. Ideal é avisar.
             
-            # Filtro local rápido
-            sort_order = st.selectbox("Ordenar por:", ["Match (IA)", "Nota (TMDB)", "Populares"])
-            if sort_order == "Nota (TMDB)":
-                items.sort(key=lambda x: float(x.get('vote_average') or 0), reverse=True)
-            elif sort_order == "Populares":
-                items.sort(key=lambda x: float(x.get('popularity') or 0), reverse=True)
-            
-            # Exibição em Grade
             cols = st.columns(3)
             for idx, item in enumerate(items):
                 with cols[idx % 3]:
-                    # Card do Filme
                     with st.container(border=True):
-                        # Poster
-                        if item['poster_path']:
-                            st.image(TMDB_IMAGE + item['poster_path'], use_container_width=True)
-                        
-                        # Título e Nota
-                        rating = float(item.get('vote_average') or 0)
-                        stars = "⭐" * int(round(rating/2))
+                        if item['poster_path']: st.image(TMDB_IMAGE + item['poster_path'], use_container_width=True)
                         st.markdown(f"**{item['title']}**")
-                        st.caption(f"{rating:.1f}/10 {stars}")
+                        rating = float(item.get('vote_average', 0) or 0)
+                        st.caption(f"{rating:.1f}/10 ⭐")
                         
-                        # Onde assistir (ícones)
                         if item.get('providers_flat'):
-                            prov_cols = st.columns(len(item['providers_flat']))
+                            p_cols = st.columns(len(item['providers_flat']))
                             for i, p in enumerate(item['providers_flat']):
-                                if i < 4: # Limita a 4 ícones pra não quebrar
-                                    with prov_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                                if i<4: 
+                                    with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
-                        # Sinopse (Expander)
-                        with st.expander("Ver detalhes"):
+                        with st.expander("Detalhes"):
                             st.write(item['overview'])
-                            c_btn1, c_btn2 = st.columns(2)
-                            if item.get('trailer'): 
-                                c_btn1.link_button("Trailer", item['trailer'])
-                            if item.get('trakt_url'):
-                                c_btn2.link_button("Trakt", item['trakt_url'])
+                            if item.get('trailer'): st.link_button("Trailer", item['trailer'])
+                            if item.get('trakt_url'): st.link_button("Trakt", item['trakt_url'])
