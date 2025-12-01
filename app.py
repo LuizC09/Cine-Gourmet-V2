@@ -117,21 +117,13 @@ def explain_choice(title, context_str, user_query, overview, rating):
 # === 3. LÓGICA HÍBRIDA & PARALELA (O CÉREBRO) ===
 
 def calculate_hybrid_score(item):
-    """
-    CineScore = 70% Semântica + 20% Nota + 10% Popularidade
-    Isso garante filmes relevantes E bons.
-    """
     sim_score = float(item.get('similarity', 0))
-    
-    # Normaliza Nota (0-10 -> 0-1)
     vote = float(item.get('vote_average', 0) or 0)
     rating_score = vote / 10.0
-    
-    # Normaliza Popularidade (Teto 1000 -> 0-1)
     pop = float(item.get('popularity', 0) or 0)
     pop_score = min(pop / 1000.0, 1.0)
     
-    # Peso: 70% Vibe, 20% Qualidade, 10% Fama
+    # 70% Semântica + 20% Nota + 10% Popularidade
     return (sim_score * 0.7) + (rating_score * 0.2) + (pop_score * 0.1)
 
 def process_single_item(item, api_type, my_services):
@@ -150,7 +142,6 @@ def process_single_item(item, api_type, my_services):
         item['providers_rent'] = rent
         item['trailer'] = get_trailer_url(item['id'], api_type)
         item['trakt_url'] = get_trakt_url(item['id'], api_type)
-        # Calcula Score Híbrido
         item['hybrid_score'] = calculate_hybrid_score(item)
         return item
     return None
@@ -163,9 +154,8 @@ def process_batch_parallel(items, api_type, my_services, limit=5):
             res = future.result()
             if res:
                 results.append(res)
-                # Não paramos no limit aqui porque queremos ordenar pelo score híbrido antes de cortar
+                # Não paramos aqui para poder ordenar tudo depois
     
-    # ORDENA PELO CINESCORE (Qualidade) E NÃO SÓ PELA SIMILARIDADE
     results.sort(key=lambda x: x['hybrid_score'], reverse=True)
     return results[:limit]
 
@@ -239,10 +229,8 @@ if page == "🔍 Busca Rápida":
             final_prompt = f"Pedido: {query}. Contexto: {context_str}"
             
             with st.spinner("IA processando + Verificando Streamings em paralelo..."):
-                # 1. Embedding
                 vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
                 
-                # 2. Busca SQL (Traz 60 candidatos)
                 resp = supabase.rpc(db_func, {
                     "query_embedding": vector, 
                     "match_threshold": threshold, 
@@ -250,20 +238,15 @@ if page == "🔍 Busca Rápida":
                     "filter_ids": blocked_ids
                 }).execute()
                 
-                # 3. Processamento Paralelo + Híbrido
                 if resp.data:
-                    # Salva resultado na sessão para persistir entre cliques de "Ignorar"
                     st.session_state['search_results'] = process_batch_parallel(resp.data, api_type, my_services, limit=8)
                 else:
                     st.session_state['search_results'] = []
 
-    # Exibição dos Resultados (Persistentes na Sessão)
     if 'search_results' in st.session_state and st.session_state['search_results']:
         
-        # Inicializa Blacklist Temporária
         if 'temp_blacklist' not in st.session_state: st.session_state['temp_blacklist'] = []
         
-        # Filtra o que o usuário marcou como "Já Vi"
         visible_items = [i for i in st.session_state['search_results'] if i['id'] not in st.session_state['temp_blacklist']]
         
         if not visible_items:
@@ -274,7 +257,6 @@ if page == "🔍 Busca Rápida":
                 with c1:
                     if item['poster_path']: st.image(TMDB_IMAGE + item['poster_path'], use_container_width=True)
                     
-                    # Botão IGNORE/JÁ VI
                     if st.button("🙈 Já vi / Ignorar", key=f"hide_{item['id']}"):
                         st.session_state['temp_blacklist'].append(item['id'])
                         st.rerun()
@@ -282,7 +264,10 @@ if page == "🔍 Busca Rápida":
                     if item.get('providers_flat'):
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
-                            if i<4: with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                            # CORREÇÃO DA INDENTAÇÃO AQUI:
+                            if i < 4:
+                                with cols[i]:
+                                    st.image(TMDB_LOGO + p['logo_path'], width=25)
                 
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
@@ -290,7 +275,6 @@ if page == "🔍 Busca Rápida":
                     
                     st.markdown(f"### {item['title']}")
                     st.caption(f"⭐ {rating:.1f}/10 | 🧠 CineScore: {hybrid}")
-                    
                     st.progress(hybrid, text="Qualidade Geral (IA + Nota)")
                     
                     expl = explain_choice(item['title'], context_str if context_str else "Geral", query, item['overview'], rating)
@@ -319,7 +303,7 @@ elif page == "💎 Curadoria VIP":
             if 'trakt_data' not in st.session_state:
                 st.error("Sincronize o perfil primeiro!")
             else:
-                with st.spinner("Gerando lista VIP (Isso usa processamento pesado)..."):
+                with st.spinner("Gerando lista VIP..."):
                     context_str = build_context_string(st.session_state['trakt_data'])
                     blocked_ids = st.session_state['trakt_data']['watched_ids']
                     
@@ -357,14 +341,16 @@ elif page == "💎 Curadoria VIP":
                         st.markdown(f"**{item['title']}**")
                         rating = float(item.get('vote_average', 0) or 0)
                         
-                        # Mostra o score híbrido se existir na lista salva
                         hybrid = int(item.get('hybrid_score', 0) * 100)
                         st.caption(f"⭐ {rating:.1f} | 🧠 {hybrid}")
                         
                         if item.get('providers_flat'):
-                            p_cols = st.columns(len(item['providers_flat']))
-                            for i, p in enumerate(item['providers_flat']):
-                                if i<4: with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
+                            p_cols = st.columns(len(item.get('providers_flat', [])))
+                            for i, p in enumerate(item.get('providers_flat', [])):
+                                # CORREÇÃO DA INDENTAÇÃO AQUI TAMBÉM:
+                                if i < 4:
+                                    with p_cols[i]:
+                                        st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
                         with st.expander("Detalhes"):
                             st.write(item['overview'])
