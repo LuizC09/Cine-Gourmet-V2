@@ -255,9 +255,9 @@ if st.button("🚀 Recomendar", type="primary"):
                             match_score = int(m['similarity']*100)
                             st.progress(match_score, text=f"Match: {match_score}%")
                             
-                            # Explicação Inteligente
-                            if mode == "Solo":
-                                # CORREÇÃO: Chama a função Solo passando o perfil A
+                            # Explicação Inteligente (CORRIGIDO)
+                            # Verifica se a palavra "Solo" está no texto selecionado
+                            if "Solo" in mode: 
                                 expl = explain_choice_solo(
                                     m['title'], 
                                     st.session_state.get('data_a', {}).get('favorites', []), 
@@ -265,7 +265,6 @@ if st.button("🚀 Recomendar", type="primary"):
                                     m['overview']
                                 )
                             else:
-                                # Chama a função Casal passando os dois perfis
                                 expl = explain_choice_couple(m['title'], "Perfil A", "Perfil B", m['overview'])
                                 
                             st.info(f"💡 {expl}")
@@ -274,3 +273,4 @@ if st.button("🚀 Recomendar", type="primary"):
 
             except Exception as e:
                 st.error(f"Erro: {e}")
+
