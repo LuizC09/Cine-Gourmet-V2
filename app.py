@@ -20,7 +20,7 @@ except:
     st.stop()
 
 genai.configure(api_key=GOOGLE_API_KEY)
-st.set_page_config(page_title="CineGourmet Híbrido", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="CineGourmet Ultimate", page_icon="🍿", layout="wide")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 TMDB_LOGO = "https://image.tmdb.org/t/p/original"
@@ -44,12 +44,10 @@ def get_trakt_profile_data(username, content_type="movies"):
     item_key = 'show' if content_type == "tv" else 'movie'
 
     try:
-        # Pega IDs Vistos (Aumentei o limite para garantir que pegue tudo recente)
         r_watched = session.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}?limit=1000", headers=headers)
         if r_watched.status_code == 200:
             data["watched_ids"] = [i[item_key]['ids']['tmdb'] for i in r_watched.json() if i[item_key]['ids'].get('tmdb')]
 
-        # Pega Avaliações (Aumentei limite para 100 para ter mais base)
         r_ratings = session.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=100", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
@@ -116,6 +114,39 @@ def explain_choice(title, context_str, user_query, overview, rating):
         return model.generate_content(prompt).text.strip()
     except: return "Recomendação baseada no seu perfil."
 
+def generate_marathon_plan(items, user_query):
+    """Cria um roteiro de 3 filmes a partir dos resultados"""
+    candidates = "\n".join([f"- {i['title']} (ID: {i['id']})" for i in items[:10]])
+    prompt = f"""
+    O usuário quer ver: "{user_query}".
+    Tenho esta lista de candidatos:
+    {candidates}
+    
+    Crie um "Roteiro de Maratona" com APENAS 3 filmes dessa lista para assistir em sequência.
+    A sequência deve ter uma progressão lógica (ex: Introdução Temática -> Clímax Pesado -> Descompressão ou Reflexão).
+    
+    Retorne neste formato exato:
+    1. [Nome do Filme] - [Por que começar com ele]
+    2. [Nome do Filme] - [Por que é o auge]
+    3. [Nome do Filme] - [Por que fecha bem]
+    """
+    try:
+        model = genai.GenerativeModel('models/gemini-2.0-flash')
+        return model.generate_content(prompt).text.strip()
+    except: return "Não foi possível gerar a maratona."
+
+def convert_list_to_text(items, username):
+    """Gera um texto formatado para compartilhar"""
+    txt = f"🎬 Curadoria CineGourmet para {username}\n\n"
+    for i, item in enumerate(items):
+        rating = float(item.get('vote_average', 0) or 0)
+        year = item.get('release_date', '')[:4] if item.get('release_date') else ''
+        if 'first_air_date' in item: year = item.get('first_air_date', '')[:4]
+        
+        txt += f"{i+1}. {item['title']} ({year}) - ⭐ {rating:.1f}\n"
+        txt += f"   {item['overview'][:100]}...\n\n"
+    return txt
+
 # === 3. LÓGICA HÍBRIDA & PARALELA ===
 
 def calculate_hybrid_score(item):
@@ -148,7 +179,7 @@ def process_single_item(item, api_type, my_services):
 
 def process_batch_parallel(items, api_type, my_services, limit=5):
     results = []
-    # Usa max_workers=5 para evitar sobrecarga no free tier
+    # ThreadPool para agilizar
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(process_single_item, item, api_type, my_services) for item in items]
         for future in concurrent.futures.as_completed(futures):
@@ -208,7 +239,6 @@ with st.sidebar:
             
     if 'trakt_data' in st.session_state:
         d = st.session_state['trakt_data']
-        # Mostra Loved e Total Vistos para confirmar leitura
         st.caption(f"✅ {len(d['loved'])} favoritos (9-10).")
         st.caption(f"👀 {len(d['watched_ids'])} itens já assistidos.")
     
@@ -236,19 +266,15 @@ if page == "🔍 Busca Rápida":
 
     query = st.text_area("O que você quer ver?", placeholder="Deixe vazio para 'Surpreenda-me'...")
     
-    # Lógica do Botão Surpreenda-me
+    # Lógica do Botão
     btn_label = "🎲 Surpreenda-me" if not query else "🚀 Buscar"
     
     if st.button(btn_label):
-        
-        # Define o prompt baseado se tem texto ou não
-        if not query:
-            if not context_str:
-                st.error("Para surpresas, preciso que você sincronize o Trakt primeiro!")
-                st.stop()
-            final_prompt = f"Analise este perfil: {context_str}. Recomende algo que ele vai AMAR baseado nas notas."
-        else:
-            final_prompt = f"Pedido: {query}. Contexto: {context_str}"
+        if not query and not context_str:
+            st.error("Para surpresas, preciso que você sincronize o Trakt primeiro!")
+            st.stop()
+            
+        final_prompt = f"Pedido: {query}. Contexto: {context_str}" if query else f"Analise: {context_str}. Recomende algo que ele vai AMAR."
         
         with st.spinner("IA processando..."):
             vector = genai.embed_content(model="models/text-embedding-004", content=final_prompt)['embedding']
@@ -261,18 +287,29 @@ if page == "🔍 Busca Rápida":
             }).execute()
             
             if resp.data:
-                st.session_state['search_results'] = process_batch_parallel(resp.data, api_type, my_services, limit=8)
+                # Salva na sessão
+                st.session_state['search_results'] = process_batch_parallel(resp.data, api_type, my_services, limit=10)
+                st.session_state['current_query'] = query if query else "Surpresa"
             else:
                 st.session_state['search_results'] = []
 
+    # Exibição
     if 'search_results' in st.session_state and st.session_state['search_results']:
         
-        if 'session_ignore' not in st.session_state: st.session_state['session_ignore'] = []
+        # --- FEATURE NOVA: MARATONA ---
+        if st.button("🍿 Gerar Roteiro de Maratona (3 Filmes)"):
+            with st.spinner("Criando a sequência perfeita..."):
+                plan = generate_marathon_plan(st.session_state['search_results'], st.session_state.get('current_query', ''))
+                st.markdown("### 🎬 Roteiro Sugerido")
+                st.success(plan)
         
+        st.divider()
+        
+        if 'session_ignore' not in st.session_state: st.session_state['session_ignore'] = []
         visible_items = [i for i in st.session_state['search_results'] if i['id'] not in st.session_state['session_ignore']]
         
         if not visible_items:
-            st.warning("Todos os itens foram ocultados ou nada encontrado.")
+            st.warning("Sem resultados.")
         else:
             for item in visible_items:
                 c1, c2 = st.columns([1, 4])
@@ -287,10 +324,8 @@ if page == "🔍 Busca Rápida":
                     if item.get('providers_flat'):
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
-                            # CORREÇÃO DA INDENTAÇÃO AQUI:
                             if i < 4:
-                                with cols[i]:
-                                    st.image(TMDB_LOGO + p['logo_path'], width=25)
+                                with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
                 
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
@@ -302,7 +337,7 @@ if page == "🔍 Busca Rápida":
                     st.caption(f"⭐ {rating:.1f}/10 | 🧠 CineScore: {hybrid}")
                     st.progress(hybrid, text="Qualidade Geral")
                     
-                    expl = explain_choice(item['title'], context_str if context_str else "Geral", query if query else "Surpresa", item['overview'], rating)
+                    expl = explain_choice(item['title'], context_str if context_str else "Geral", st.session_state.get('current_query', ''), item['overview'], rating)
                     st.success(f"💡 {expl}")
                     
                     b1, b2 = st.columns(2)
@@ -354,6 +389,11 @@ elif page == "💎 Curadoria VIP":
         
         if dashboard and dashboard.get('curated_list'):
             st.divider()
+            
+            # --- FEATURE NOVA: EXPORTAR ---
+            text_data = convert_list_to_text(dashboard['curated_list'], username)
+            st.download_button("📤 Baixar Lista (Para WhatsApp)", text_data, file_name="minha_curadoria.txt")
+            
             last_up = datetime.fromisoformat(dashboard['updated_at']).strftime('%d/%m %H:%M')
             st.caption(f"Atualizado em: {last_up}")
             
@@ -372,10 +412,7 @@ elif page == "💎 Curadoria VIP":
                         if item.get('providers_flat'):
                             p_cols = st.columns(len(item.get('providers_flat', [])))
                             for i, p in enumerate(item.get('providers_flat', [])):
-                                # CORREÇÃO DA INDENTAÇÃO AQUI TAMBÉM:
-                                if i < 4:
-                                    with p_cols[i]:
-                                        st.image(TMDB_LOGO + p['logo_path'], width=20)
+                                if i < 4: with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
                         with st.expander("Detalhes"):
                             st.write(item['overview'])
