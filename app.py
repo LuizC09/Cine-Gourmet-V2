@@ -5,157 +5,250 @@ import pandas as pd
 import plotly.express as px
 from supabase import create_client
 
-# === CONFIGURAÇÃO ===
+# === CONFIGURAÇÃO E SEGREDOS ===
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     TRAKT_CLIENT_ID = st.secrets["TRAKT_CLIENT_ID"]
-    TMDB_API_KEY = st.secrets["TMDB_API_KEY"] # <--- VOCÊ PRECISA ADICIONAR ISSO NOS SECRETS!
+    TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
 except:
-    st.error("Configure os Secrets! Falta o TMDB_API_KEY.")
+    st.error("🚨 Configure os Secrets no Streamlit! (Falta TMDB_API_KEY ou outros)")
     st.stop()
 
 genai.configure(api_key=GOOGLE_API_KEY)
-st.set_page_config(page_title="CineGourmet Pro", page_icon="🍿", layout="wide")
+st.set_page_config(page_title="CineGourmet Ultimate", page_icon="🍿", layout="wide")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 TMDB_IMAGE = "https://image.tmdb.org/t/p/w500"
 TMDB_LOGO = "https://image.tmdb.org/t/p/original"
 
-# === FUNÇÕES NOVAS (STREAMING) ===
+# === FUNÇÕES DE DADOS (TRAKT & TMDB) ===
 
-def get_watch_providers(movie_id):
-    """Descobre onde o filme está passando no Brasil"""
+def get_trakt_stats(username):
+    """Pega estatísticas brutas do usuário"""
+    headers = {
+        'Content-Type': 'application/json',
+        'trakt-api-version': '2',
+        'trakt-api-key': TRAKT_CLIENT_ID
+    }
+    try:
+        r = requests.get(f"https://api.trakt.tv/users/{username}/stats", headers=headers)
+        if r.status_code == 200: return r.json()
+    except: return None
+    return None
+
+def get_trakt_profile_data(username):
+    """Baixa um resumo do gosto do usuário para a IA"""
+    headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
+    
+    data = {"history": [], "favorites": [], "watched_ids": []}
+    
+    try:
+        # 1. Watched IDs (Para bloquear repetidos)
+        r_watched = requests.get(f"https://api.trakt.tv/users/{username}/watched/movies", headers=headers)
+        if r_watched.status_code == 200:
+            data["watched_ids"] = [i['movie']['ids']['tmdb'] for i in r_watched.json() if i['movie']['ids'].get('tmdb')]
+
+        # 2. Histórico Recente
+        r_hist = requests.get(f"https://api.trakt.tv/users/{username}/history/movies?limit=10", headers=headers)
+        if r_hist.status_code == 200:
+            data["history"] = [i['movie']['title'] for i in r_hist.json()]
+
+        # 3. Favoritos (Nota 9 ou 10)
+        r_fav = requests.get(f"https://api.trakt.tv/users/{username}/ratings/movies/9,10?limit=10", headers=headers)
+        if r_fav.status_code == 200:
+            data["favorites"] = [i['movie']['title'] for i in r_fav.json()]
+            
+    except: pass
+    return data
+
+def get_watch_providers(movie_id, filter_providers=None):
+    """
+    Retorna onde assistir. 
+    Se filter_providers for passado (lista de nomes), retorna True/False se está disponível neles.
+    """
     url = f"https://api.themoviedb.org/3/movie/{movie_id}/watch/providers?api_key={TMDB_API_KEY}"
     try:
         r = requests.get(url)
         data = r.json()
         if 'results' in data and 'BR' in data['results']:
-            br_providers = data['results']['BR']
-            # Prioridade: Flatrate (Assinatura) > Rent (Aluguel)
-            if 'flatrate' in br_providers:
-                return br_providers['flatrate'][:3] # Pega os top 3 streamings
-            elif 'rent' in br_providers:
-                return br_providers['rent'][:3] # Se não tiver streaming, mostra onde alugar
+            br = data['results']['BR']
+            flatrate = br.get('flatrate', [])
+            rent = br.get('rent', [])
+            
+            # Lógica de Filtro
+            if filter_providers:
+                # Normaliza nomes (ex: 'Disney Plus' -> 'Disney+')
+                avail_names = [p['provider_name'] for p in flatrate]
+                # Verifica se ALGUM dos meus streamings tem o filme
+                is_available = any(my_prov in avail_names for my_prov in filter_providers)
+                return is_available, flatrate, rent
+            
+            return True, flatrate, rent # Sem filtro, retorna tudo
     except: pass
-    return []
+    return False, [], []
 
-# ... (MANTENHA AS OUTRAS FUNÇÕES: get_trakt_stats, get_trakt_watched_ids, etc.) ...
-# Vou resumir aqui para não ficar gigante, mas você mantém as funções antigas de Trakt e Explain
-
-def get_trakt_watched_ids(username):
-    # ... (Copie do código anterior) ...
-    headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
-    url = f"https://api.trakt.tv/users/{username}/watched/movies"
+def explain_choice_couple(movie, persona_a, persona_b, overview):
+    """Explica a escolha para o CASAL"""
+    prompt = f"""
+    Contexto: O Usuário A gosta de: {persona_a}.
+    O Usuário B gosta de: {persona_b}.
+    Filme recomendado: "{movie}" (Sinopse: {overview}).
+    Explique em UMA frase curta e divertida por que esse filme é o "ponto de equilíbrio" perfeito para os dois.
+    """
     try:
-        r = requests.get(url, headers=headers)
-        if r.status_code == 200:
-            return [i['movie']['ids']['tmdb'] for i in r.json() if i['movie']['ids'].get('tmdb')]
-    except: return []
-    return []
-
-def get_trakt_profile_text(username):
-    # ... (Copie do código anterior) ...
-    headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
-    url_favs = f"https://api.trakt.tv/users/{username}/ratings/movies/9,10?limit=5"
-    try:
-        r = requests.get(url_favs, headers=headers)
-        if r.status_code == 200:
-            filmes = [i['movie']['title'] for i in r.json()]
-            return f"Favoritos: {', '.join(filmes)}"
-    except: pass
-    return ""
-
-def explain_choice(movie_title, user_persona, movie_overview):
-    # ... (Copie do código anterior) ...
-    prompt = f"O usuário gosta de: {user_persona}. Recomendei '{movie_title}'. Explique em 1 frase curta por que combina."
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        return model.generate_content(prompt).text.strip()
-    except: return "Match de vibe."
+        return genai.GenerativeModel('gemini-1.5-flash').generate_content(prompt).text.strip()
+    except: return "Um ótimo meio termo para o casal."
 
 # === INTERFACE ===
 
-col_logo, col_title = st.columns([1, 5])
-with col_logo: st.write("🍿")
-with col_title:
-    st.title("CineGourmet AI")
-    st.caption("Com onde assistir (Brasil)")
+st.title("🍿 CineGourmet Ultimate")
+st.markdown("**IA + Psicologia + Streaming**")
 
+# --- CONFIGURAÇÃO LATERAL ---
 with st.sidebar:
-    st.header("👤 Perfil")
-    trakt_user = st.text_input("Usuário Trakt")
+    st.header("⚙️ Configuração")
     
-    if 'watched_ids' not in st.session_state: st.session_state['watched_ids'] = []
-    if 'persona' not in st.session_state: st.session_state['persona'] = ""
-
-    if trakt_user and st.button("Sincronizar"):
-        with st.spinner("Analisando..."):
-            st.session_state['watched_ids'] = get_trakt_watched_ids(trakt_user)
-            st.session_state['persona'] = get_trakt_profile_text(trakt_user)
-            st.success("Sincronizado!")
-            
+    mode = st.radio("Modo de Uso", ["Solo (Só eu)", "Casal (Eu + Mozão)"])
+    
     st.divider()
-    threshold = st.slider("Ousadia", 0.1, 1.0, 0.45)
+    
+    # INPUTS DE USUÁRIO
+    user_a = st.text_input("Seu Trakt User", key="user_a")
+    user_b = None
+    if mode == "Casal (Eu + Mozão)":
+        user_b = st.text_input("Trakt User do Parceiro(a)", key="user_b")
+    
+    if st.button("🔄 Sincronizar Perfis"):
+        with st.spinner("Baixando dados do Trakt..."):
+            # Perfil A
+            if user_a:
+                data_a = get_trakt_profile_data(user_a)
+                stats_a = get_trakt_stats(user_a)
+                st.session_state['data_a'] = data_a
+                st.session_state['stats_a'] = stats_a
+            
+            # Perfil B
+            if user_b:
+                data_b = get_trakt_profile_data(user_b)
+                st.session_state['data_b'] = data_b
+            
+            st.success("Sincronizado!")
 
-user_query = st.text_area("O que vamos ver?", placeholder="Ex: Suspense policial...")
+    # EXIBIÇÃO DE STATS (VOLTOU!)
+    if 'stats_a' in st.session_state and st.session_state['stats_a']:
+        st.divider()
+        stats = st.session_state['stats_a']
+        minutos = stats['movies']['minutes']
+        horas = minutes = int(minutos / 60)
+        dias = round(horas / 24, 1)
+        
+        c1, c2 = st.columns(2)
+        c1.metric("Filmes Vistos", stats['movies']['watched'])
+        c2.metric("Horas de Vida", horas, help=f"{dias} dias inteiros assistindo filme!")
+    
+    st.divider()
+    
+    # FILTRO DE STREAMING
+    st.subheader("📺 Meus Streamings")
+    st.caption("Se marcar, só recomendo o que tem neles.")
+    
+    # Lista dos principais no BR (Nomes exatos do TMDB)
+    available_services = ["Netflix", "Amazon Prime Video", "Disney Plus", "Max", "Apple TV Plus", "Globoplay"]
+    my_services = st.multiselect("O que você assina?", available_services)
+    
+    threshold = st.slider("Nível de Ousadia", 0.0, 1.0, 0.45)
 
-if st.button("🎬 Buscar", type="primary"):
+# --- ÁREA PRINCIPAL ---
+
+# Montagem do Prompt baseada no Modo
+prompt_context = ""
+blocked_ids = []
+
+if 'data_a' in st.session_state:
+    da = st.session_state['data_a']
+    summary_a = f"Histórico: {', '.join(da['history'])}. Favoritos: {', '.join(da['favorites'])}."
+    prompt_context += f"PERFIL A: {summary_a} "
+    blocked_ids += da['watched_ids']
+
+if mode == "Casal (Eu + Mozão)" and 'data_b' in st.session_state:
+    db = st.session_state['data_b']
+    summary_b = f"Histórico: {', '.join(db['history'])}. Favoritos: {', '.join(db['favorites'])}."
+    prompt_context += f"PERFIL B (PARCEIRO): {summary_b}. O OBJETIVO É AGRADAR OS DOIS."
+    blocked_ids += db['watched_ids'] # Bloqueia o que QUALQUER UM dos dois já viu
+
+# Input de Busca
+user_query = st.text_area("O que vamos assistir?", placeholder="Ex: Suspense curto..." if mode == "Solo" else "Ex: Algo que a gente não brigue pra escolher...")
+
+if st.button("🚀 Recomendar", type="primary"):
     if not user_query:
-        st.warning("Digita algo!")
+        st.warning("Diga o que vocês querem!")
     else:
-        prompt_final = user_query
-        if st.session_state['persona']:
-            prompt_final += f". Gosto do usuário: {st.session_state['persona']}"
-
-        with st.spinner("Buscando filmes e verificando disponibilidade..."):
+        full_prompt = f"{user_query}. {prompt_context}"
+        
+        with st.spinner("1. Analisando psicologia... 2. Buscando filmes... 3. Filtrando streamings..."):
             try:
                 # 1. Embed
-                vector = genai.embed_content(model="models/text-embedding-004", content=prompt_final)['embedding']
+                vector = genai.embed_content(model="models/text-embedding-004", content=full_prompt)['embedding']
 
-                # 2. Search
+                # 2. Busca Ampliada (Pega 40 filmes para ter margem pro filtro)
                 response = supabase.rpc("match_movies", {
-                    "query_embedding": vector, 
-                    "match_threshold": threshold, 
-                    "match_count": 4,
-                    "filter_ids": st.session_state['watched_ids']
+                    "query_embedding": vector,
+                    "match_threshold": threshold,
+                    "match_count": 40, # Pega MUITOS para poder filtrar depois
+                    "filter_ids": blocked_ids
                 }).execute()
-
+                
+                final_list = []
+                
+                # 3. Filtragem Python (Streaming)
                 if response.data:
                     for m in response.data:
-                        c1, c2 = st.columns([1, 3])
+                        if len(final_list) >= 4: break # Já achamos o top 4
                         
+                        # Verifica onde passa
+                        is_ok, flatrate, rent = get_watch_providers(m['id'], my_services if my_services else None)
+                        
+                        if is_ok:
+                            m['providers_flat'] = flatrate
+                            m['providers_rent'] = rent
+                            final_list.append(m)
+                
+                # 4. Exibição
+                if not final_list:
+                    st.error("Putz! Encontrei filmes bons, mas NENHUM está nos seus streamings. Tente desmarcar o filtro ou baixar a 'Ousadia'.")
+                else:
+                    for m in final_list:
+                        c1, c2 = st.columns([1, 3])
                         with c1:
                             poster = m['poster_path'] if m['poster_path'] else ""
-                            if poster and not poster.startswith("http"):
-                                poster = TMDB_IMAGE + (poster if poster.startswith("/") else "/" + poster)
+                            if poster and not poster.startswith("http"): poster = TMDB_IMAGE + poster
                             st.image(poster, use_container_width=True)
                             
-                            # === EXIBIR STREAMINGS ===
-                            providers = get_watch_providers(m['id'])
-                            if providers:
-                                st.caption("Assista em:")
-                                # Mostra os ícones lado a lado
-                                cols_prov = st.columns(len(providers))
-                                for idx, prov in enumerate(providers):
-                                    with cols_prov[idx]:
-                                        logo_url = TMDB_LOGO + prov['logo_path']
-                                        st.image(logo_url, width=30)
-                            else:
-                                st.caption("Indisponível em streamings BR")
+                            # Ícones de Streaming
+                            if m['providers_flat']:
+                                st.caption("Disponível em:")
+                                cols = st.columns(len(m['providers_flat']))
+                                for i, p in enumerate(m['providers_flat']):
+                                    with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=30)
+                            elif m['providers_rent']:
+                                st.caption("Aluguel:")
+                                st.write(", ".join([p['provider_name'] for p in m['providers_rent']]))
 
                         with c2:
-                            st.markdown(f"### {m['title']}")
+                            st.subheader(m['title'])
                             match_score = int(m['similarity']*100)
-                            st.metric("Match", f"{match_score}%")
+                            st.progress(match_score, text=f"Match: {match_score}%")
                             
-                            explanation = explain_choice(m['title'], st.session_state['persona'], m['overview'])
-                            st.info(f"🤖 {explanation}")
-                            
-                            with st.expander("Sinopse"):
-                                st.write(m['overview'])
+                            # Explicação Inteligente
+                            if mode == "Solo":
+                                expl = explain_choice_couple(m['title'], prompt_context, "", m['overview'])
+                            else:
+                                expl = explain_choice_couple(m['title'], "Perfil A", "Perfil B", m['overview'])
+                                
+                            st.info(f"💡 {expl}")
+                            with st.expander("Sinopse"): st.write(m['overview'])
                         st.divider()
-                else:
-                    st.warning("Nada encontrado.")
+
             except Exception as e:
                 st.error(f"Erro: {e}")
