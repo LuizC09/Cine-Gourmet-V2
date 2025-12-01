@@ -88,13 +88,28 @@ def get_watch_providers(movie_id, filter_providers=None):
     except: pass
     return False, [], []
 
+def explain_choice_solo(movie, persona, user_query, overview):
+    """Explica a escolha para UM usuário"""
+    prompt = f"""
+    Contexto: O usuário tem esse perfil: "{persona}".
+    Ele pediu especificamente: "{user_query}".
+    Eu recomendei o filme: "{movie}" (Sinopse: {overview}).
+    
+    Explique em UMA frase curta e persuasiva (estilo curador de cinema) por que esse filme é a escolha perfeita para ele agora.
+    Não use frases genéricas. Conecte o pedido com a sinopse.
+    """
+    try:
+        return genai.GenerativeModel('gemini-1.5-flash').generate_content(prompt).text.strip()
+    except: return "Uma escolha sólida baseada no seu pedido."
+
 def explain_choice_couple(movie, persona_a, persona_b, overview):
     """Explica a escolha para o CASAL"""
     prompt = f"""
     Contexto: O Usuário A gosta de: {persona_a}.
     O Usuário B gosta de: {persona_b}.
     Filme recomendado: "{movie}" (Sinopse: {overview}).
-    Explique em UMA frase curta e divertida por que esse filme é o "ponto de equilíbrio" perfeito para os dois.
+    
+    Explique em UMA frase curta e divertida por que esse filme resolve o problema de escolher algo que os dois gostem.
     """
     try:
         return genai.GenerativeModel('gemini-1.5-flash').generate_content(prompt).text.strip()
@@ -242,8 +257,15 @@ if st.button("🚀 Recomendar", type="primary"):
                             
                             # Explicação Inteligente
                             if mode == "Solo":
-                                expl = explain_choice_couple(m['title'], prompt_context, "", m['overview'])
+                                # CORREÇÃO: Chama a função Solo passando o perfil A
+                                expl = explain_choice_solo(
+                                    m['title'], 
+                                    st.session_state.get('data_a', {}).get('favorites', []), 
+                                    user_query, 
+                                    m['overview']
+                                )
                             else:
+                                # Chama a função Casal passando os dois perfis
                                 expl = explain_choice_couple(m['title'], "Perfil A", "Perfil B", m['overview'])
                                 
                             st.info(f"💡 {expl}")
