@@ -88,32 +88,45 @@ def get_watch_providers(movie_id, filter_providers=None):
     except: pass
     return False, [], []
 
-def explain_choice_solo(movie, persona, user_query, overview):
-    """Explica a escolha para UM usuário"""
-    prompt = f"""
-    Contexto: O usuário tem esse perfil: "{persona}".
-    Ele pediu especificamente: "{user_query}".
-    Eu recomendei o filme: "{movie}" (Sinopse: {overview}).
+def explain_choice_solo(movie, favorites_list, user_query, overview):
+    """Explica a escolha conectando pontos específicos"""
     
-    Explique em UMA frase curta e persuasiva (estilo curador de cinema) por que esse filme é a escolha perfeita para ele agora.
-    Não use frases genéricas. Conecte o pedido com a sinopse.
-    """
-    try:
-        return genai.GenerativeModel('gemini-1.5-flash').generate_content(prompt).text.strip()
-    except: return "Uma escolha sólida baseada no seu pedido."
+    # 1. Limpeza de Dados (Garante que é texto, não lista)
+    if isinstance(favorites_list, list):
+        favs_str = ", ".join(favorites_list[:5]) # Pega top 5
+    else:
+        favs_str = str(favorites_list)
+        
+    if not favs_str: favs_str = "Cinema em geral"
 
-def explain_choice_couple(movie, persona_a, persona_b, overview):
-    """Explica a escolha para o CASAL"""
     prompt = f"""
-    Contexto: O Usuário A gosta de: {persona_a}.
-    O Usuário B gosta de: {persona_b}.
-    Filme recomendado: "{movie}" (Sinopse: {overview}).
+    Atue como um curador de cinema 'snob' e técnico.
     
-    Explique em UMA frase curta e divertida por que esse filme resolve o problema de escolher algo que os dois gostem.
+    DADOS:
+    - O usuário ama: {favs_str}.
+    - O usuário pediu EXATAMENTE: "{user_query}".
+    - Filme Recomendado: "{movie}".
+    - Sinopse Técnica: "{overview}".
+
+    TAREFA:
+    Escreva uma justificativa de UMA frase explicando por que esse filme atende o pedido.
+    REGRA DE OURO: Não seja genérico. Cite um elemento concreto (a fotografia, o diretor, o plot twist, a atmosfera, o ritmo) que conecta o filme ao pedido "{user_query}".
+    Comece a frase com: "Porque..."
     """
+    
     try:
-        return genai.GenerativeModel('gemini-1.5-flash').generate_content(prompt).text.strip()
-    except: return "Um ótimo meio termo para o casal."
+        # Desativa filtros de segurança para permitir sinopses de Crime/Terror
+        safe = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        model = genai.GenerativeModel('gemini-1.5-flash', safety_settings=safe)
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        return f"Erro ao explicar: {str(e)}" # Agora veremos o erro real se acontecer
 
 # === INTERFACE ===
 
@@ -255,12 +268,14 @@ if st.button("🚀 Recomendar", type="primary"):
                             match_score = int(m['similarity']*100)
                             st.progress(match_score, text=f"Match: {match_score}%")
                             
-                            # Explicação Inteligente (CORRIGIDO)
-                            # Verifica se a palavra "Solo" está no texto selecionado
+                            # Explicação Inteligente (REVISADA)
                             if "Solo" in mode: 
+                                # Garante que favorites é uma lista antes de passar
+                                raw_favs = st.session_state.get('data_a', {}).get('favorites', [])
+                                
                                 expl = explain_choice_solo(
                                     m['title'], 
-                                    st.session_state.get('data_a', {}).get('favorites', []), 
+                                    raw_favs, 
                                     user_query, 
                                     m['overview']
                                 )
@@ -273,4 +288,5 @@ if st.button("🚀 Recomendar", type="primary"):
 
             except Exception as e:
                 st.error(f"Erro: {e}")
+
 
