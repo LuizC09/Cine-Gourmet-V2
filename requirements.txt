@@ -1,4 +1,5 @@
 streamlit
 google-generativeai
 supabase
+plotly
 requests
