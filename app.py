@@ -170,6 +170,7 @@ def process_single_item(item, api_type, my_services):
 
 def process_batch_parallel(items, api_type, my_services, limit=5):
     results = []
+    # ThreadPool para agilizar
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(process_single_item, item, api_type, my_services) for item in items]
         for future in concurrent.futures.as_completed(futures):
@@ -238,7 +239,6 @@ with st.sidebar:
     my_services = st.multiselect("Assinaturas:", services_list, default=services_list)
     threshold = st.slider("Ousadia", 0.0, 1.0, 0.45, help="Baixo: Literal. Alto: Criativo.")
 
-# MENU COM AS 3 OPÇÕES
 page = st.radio("Modo", ["🔍 Busca Rápida", "🧞 Akinator (Quiz)", "💎 Curadoria VIP"], horizontal=True, label_visibility="collapsed")
 st.divider()
 
@@ -305,7 +305,8 @@ if page == "🔍 Busca Rápida":
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
                             if i < 4: 
-                                with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                                with cols[i]:
+                                    st.image(TMDB_LOGO + p['logo_path'], width=25)
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
                     hybrid = int(item.get('hybrid_score', 0) * 100)
@@ -380,7 +381,6 @@ elif page == "🧞 Akinator (Quiz)":
             else:
                 st.error("O gênio não encontrou nada com essas especificações tão rígidas!")
 
-    # Reutiliza exibição da Busca Rápida
     if 'search_results' in st.session_state and st.session_state['search_results'] and st.session_state.get('current_query') == "Quiz Akinator":
         st.divider()
         st.subheader("🔮 Previsões do Gênio")
@@ -399,7 +399,9 @@ elif page == "🧞 Akinator (Quiz)":
                 if item.get('providers_flat'):
                     cols = st.columns(len(item['providers_flat']))
                     for i, p in enumerate(item['providers_flat']):
-                        if i < 4: with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                        if i < 4: 
+                            with cols[i]:
+                                st.image(TMDB_LOGO + p['logo_path'], width=25)
             with c2:
                 rating = float(item.get('vote_average', 0) or 0)
                 hybrid = int(item.get('hybrid_score', 0) * 100)
@@ -484,7 +486,8 @@ elif page == "💎 Curadoria VIP":
                             p_cols = st.columns(len(item.get('providers_flat', [])))
                             for i, p in enumerate(item.get('providers_flat', [])):
                                 if i < 4: 
-                                    with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
+                                    with p_cols[i]:
+                                        st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
                         with st.expander("Detalhes"):
                             st.write(item['overview'])
