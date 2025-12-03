@@ -7,6 +7,7 @@ from datetime import datetime
 import concurrent.futures
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import random
 
 # === 1. CONFIGURAÇÃO E SEGREDOS ===
 try:
@@ -39,24 +40,35 @@ session = get_session()
 @st.cache_data(ttl=3600)
 def get_trakt_profile_data(username, content_type="movies"):
     headers = {'Content-Type': 'application/json', 'trakt-api-version': '2', 'trakt-api-key': TRAKT_CLIENT_ID}
-    data = {"history": [], "loved": [], "liked": [], "hated": [], "watched_ids": []}
+    # Mudança: 'positive' agora guarda tudo de 7 a 10
+    data = {"history": [], "positive": [], "hated": [], "watched_ids": []}
     t_type = "shows" if content_type == "tv" else "movies"
     item_key = 'show' if content_type == "tv" else 'movie'
 
     try:
+        # Histórico (Vistos)
         r_watched = session.get(f"https://api.trakt.tv/users/{username}/watched/{t_type}?limit=1000", headers=headers)
         if r_watched.status_code == 200:
             data["watched_ids"] = [i[item_key]['ids']['tmdb'] for i in r_watched.json() if i[item_key]['ids'].get('tmdb')]
 
-        r_ratings = session.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=100", headers=headers)
+        # Ratings (Notas) - Pegamos 200 para ter bastante base
+        r_ratings = session.get(f"https://api.trakt.tv/users/{username}/ratings/{t_type}?limit=200", headers=headers)
         if r_ratings.status_code == 200:
             for item in r_ratings.json():
                 title = item[item_key]['title']
                 rating = item['rating']
-                entry = f"{title} ({rating}/10)"
-                if rating >= 9: data["loved"].append(entry)
-                elif rating >= 7: data["liked"].append(entry)
-                elif rating <= 5: data["hated"].append(entry)
+                
+                # Armazena tupla (Nota, Titulo) para ordenar depois
+                if rating >= 7:
+                    data["positive"].append((rating, f"{title} ({rating}/10)"))
+                elif rating <= 5:
+                    data["hated"].append(f"{title} ({rating}/10)")
+            
+            # Ordena os positivos: As notas 10 ficam no topo, 7 no final
+            data["positive"].sort(key=lambda x: x[0], reverse=True)
+            # Remove a nota numérica da lista final, deixa só a string formatada
+            data["positive"] = [x[1] for x in data["positive"]]
+
     except: pass
     return data
 
@@ -95,22 +107,36 @@ def get_trakt_url(content_id, content_type):
 def build_context_string(data):
     if not data: return ""
     c = ""
-    if data.get('loved'): c += f"AMOU (9-10): {', '.join(data['loved'][:15])}. "
-    if data.get('liked'): c += f"CURTIU (7-8): {', '.join(data['liked'][:10])}. "
-    if data.get('hated'): c += f"ODIOU/EVITAR (1-5): {', '.join(data['hated'][:15])}. "
+    # Pega os Top 40 filmes positivos (Misturando 10s, 9s, 8s e 7s ordenados)
+    if data.get('positive'): 
+        c += f"O USUÁRIO GOSTOU DESSES (Prioridade Alta para notas 9-10, Média para 7-8): {', '.join(data['positive'][:40])}. "
+    if data.get('hated'): 
+        c += f"O USUÁRIO DETESTOU/EVITAR (1-5): {', '.join(data['hated'][:20])}. "
     return c
 
 def explain_choice(title, context_str, user_query, overview, rating):
+    # Prompt blindado contra comparações absurdas
     prompt = f"""
-    Atue como crítico de cinema.
-    PERFIL: {context_str}
-    PEDIDO: "{user_query}"
-    OBRA: "{title}" ({rating}/10).
-    SINOPSE: {overview}
-    TAREFA: Frase única e persuasiva conectando a obra ao perfil.
+    Atue como um amigo cinéfilo SINCERO e 'pé no chão'.
+    
+    CONTEXTO:
+    - O usuário gosta de: {context_str}
+    - Ele pediu: "{user_query}"
+    - Filme sugerido: "{title}" (Nota: {rating}/10).
+    - Sinopse: {overview}
+    
+    REGRA DE OURO (LEIA COM ATENÇÃO):
+    1. JAMAIS compare filmes infantis/comédias bobas com clássicos sérios (ex: Nunca compare nada com "Tropa de Elite", "Oppenheimer" ou "Poderoso Chefão" a menos que seja um drama policial/guerra do mesmo nível).
+    2. Se o filme for "divertido mas bobo" (ex: Velozes e Furiosos, filmes de Youtuber), assuma isso! Diga "É para desligar o cérebro", "Curtição sem compromisso". Não finja que é arte.
+    3. Se o filme for desconhecido mas tiver nota alta, seja cético: "Parece ser uma pérola escondida bem avaliada pelos fãs".
+    4. NÃO use adjetivos exagerados ("Visceral", "Perturbador", "Obra-prima") para filmes nota 6 ou 7.
+    
+    SAÍDA:
+    Escreva apenas UMA frase (max 25 palavras) explicando o apelo do filme de forma honesta.
     """
     try:
-        model = genai.GenerativeModel('models/gemini-2.0-flash')
+        # Usa o 1.5 Flash se o 2.0 estiver sem cota, ou vice-versa
+        model = genai.GenerativeModel('models/gemini-2.0-flash') 
         return model.generate_content(prompt).text.strip()
     except: return "Recomendação baseada no seu perfil."
 
@@ -141,12 +167,26 @@ def convert_list_to_text(items, username):
 # === 3. LÓGICA HÍBRIDA & PARALELA ===
 
 def calculate_hybrid_score(item):
+    """
+    CineScore v4: Mais focado no tema, menos aleatório.
+    """
     sim_score = float(item.get('similarity', 0))
     vote = float(item.get('vote_average', 0) or 0)
-    rating_score = vote / 10.0
+    
+    # Normalização
+    rating_score = (vote / 10.0) ** 2 # Mantém o peso quadrático (nota 8 vale muito mais que 6)
     pop = float(item.get('popularity', 0) or 0)
     pop_score = min(pop / 1000.0, 1.0)
-    return (sim_score * 0.7) + (rating_score * 0.2) + (pop_score * 0.1)
+    
+    # Reduzi o caos de 0.15 para 0.05 (Apenas 5% de chance de "zebras" aparecerem)
+    chaos = random.random() * 0.05
+    
+    # PESOS AJUSTADOS:
+    # 70% Semântica (Tem que ter a ver com o pedido!)
+    # 20% Qualidade (Tem que ser bom)
+    # 5% Fama (Para filtrar filmes obscuros com nota alta falsa)
+    # 5% Caos (Tempero leve)
+    return (sim_score * 0.70) + (rating_score * 0.20) + (pop_score * 0.05) + chaos
 
 def process_single_item(item, api_type, my_services):
     is_ok, flat, rent = get_watch_providers(item['id'], api_type)
@@ -170,7 +210,6 @@ def process_single_item(item, api_type, my_services):
 
 def process_batch_parallel(items, api_type, my_services, limit=5):
     results = []
-    # ThreadPool para agilizar
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(process_single_item, item, api_type, my_services) for item in items]
         for future in concurrent.futures.as_completed(futures):
@@ -219,7 +258,7 @@ with st.sidebar:
     st.divider()
     username = st.text_input("Usuário Trakt:", placeholder="ex: lscastro")
     
-    if st.button("🔄 Sincronizar", help="Baixa seu histórico e suas notas do Trakt."):
+    if st.button("🔄 Sincronizar", help="Baixa seu histórico e notas do Trakt (Considera notas 7+)."):
         if username:
             with st.spinner("Baixando dados..."):
                 st.session_state['trakt_data'] = get_trakt_profile_data(username, api_type)
@@ -230,7 +269,8 @@ with st.sidebar:
             
     if 'trakt_data' in st.session_state:
         d = st.session_state['trakt_data']
-        st.caption(f"✅ {len(d['loved'])} favoritos (9-10).")
+        # Mostra Positivos (7-10) e Vistos
+        st.caption(f"✅ {len(d['positive'])} filmes curtidos (7-10).")
         st.caption(f"👀 {len(d['watched_ids'])} vistos.")
     
     st.divider()
@@ -253,7 +293,7 @@ if page == "🔍 Busca Rápida":
     if 'trakt_data' in st.session_state:
         context_str = build_context_string(st.session_state['trakt_data'])
         full_blocked_ids = st.session_state['trakt_data']['watched_ids'] + st.session_state.get('app_blacklist', [])
-        st.info(f"🧠 Personalizado para **{username}**")
+        st.info(f"🧠 Personalizado para **{username}** (Considerando notas 7 a 10)")
 
     query = st.text_area("O que você quer ver?", placeholder="Deixe vazio para 'Surpreenda-me'...")
     
@@ -305,8 +345,7 @@ if page == "🔍 Busca Rápida":
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
                             if i < 4: 
-                                with cols[i]:
-                                    st.image(TMDB_LOGO + p['logo_path'], width=25)
+                                with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
                     hybrid = int(item.get('hybrid_score', 0) * 100)
@@ -324,7 +363,10 @@ if page == "🔍 Busca Rápida":
                     if item.get('trailer'): b1.link_button("▶️ Trailer", item['trailer'], help="Ver no YouTube")
                     if item.get('trakt_url'): b2.link_button("📝 Trakt", item['trakt_url'], help="Abrir página do Trakt")
                     
-                    with st.expander("Sinopse"): st.write(item['overview'])
+                    with st.expander("Detalhes & Análise IA"):
+                        if item.get('ai_analysis'):
+                            st.info(f"🧠 **CineGourmet Brain:**\n\n{item['ai_analysis']}")
+                        st.write(f"**Sinopse:** {item['overview']}")
                 st.divider()
 
 # ==============================================================================
@@ -400,8 +442,7 @@ elif page == "🧞 Akinator (Quiz)":
                     cols = st.columns(len(item['providers_flat']))
                     for i, p in enumerate(item['providers_flat']):
                         if i < 4: 
-                            with cols[i]:
-                                st.image(TMDB_LOGO + p['logo_path'], width=25)
+                            with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
             with c2:
                 rating = float(item.get('vote_average', 0) or 0)
                 hybrid = int(item.get('hybrid_score', 0) * 100)
@@ -419,7 +460,7 @@ elif page == "🧞 Akinator (Quiz)":
                 if item.get('trailer'): b1.link_button("▶️ Trailer", item['trailer'])
                 if item.get('trakt_url'): b2.link_button("📝 Trakt", item['trakt_url'])
                 
-                with st.expander("Sinopse"): st.write(item['overview'])
+                with st.expander("Detalhes"): st.write(item['overview'])
             st.divider()
 
 # ==============================================================================
@@ -486,8 +527,7 @@ elif page == "💎 Curadoria VIP":
                             p_cols = st.columns(len(item.get('providers_flat', [])))
                             for i, p in enumerate(item.get('providers_flat', [])):
                                 if i < 4: 
-                                    with p_cols[i]:
-                                        st.image(TMDB_LOGO + p['logo_path'], width=20)
+                                    with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
                         
                         with st.expander("Detalhes"):
                             st.write(item['overview'])
