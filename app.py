@@ -13,13 +13,14 @@ import random
 # 1. CONFIGURAÇÃO E SEGREDOS
 # ==============================================================================
 try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-    TRAKT_CLIENT_ID = st.secrets["TRAKT_CLIENT_ID"]
-    TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
+    SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://lbmhcmypsklbssatzgeh.supabase.co")
+    SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "sb_secret_CwzJw_N-j9sNwNrYPakveg_zGzQfNKs")
+    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "AIzaSyDjOi1VKtOVzvCSbYn_9TrxyKz5duQiOz0")
+    
+    TRAKT_CLIENT_ID = st.secrets.get("TRAKT_CLIENT_ID", "SEU_CLIENT_ID")
+    TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "SUA_CHAVE_TMDB")
 except:
-    st.error("🚨 Configure os Secrets no Streamlit!")
+    st.error("🚨 Erro de Configuração de Chaves.")
     st.stop()
 
 genai.configure(api_key=GOOGLE_API_KEY)
@@ -104,13 +105,12 @@ def build_context_string(data):
     if not data: return ""
     c = ""
     if data.get('positive'): 
-        c += f"O USUÁRIO GOSTOU DESSES (9-10 é amor, 7-8 é curtiu): {', '.join(data['positive'][:40])}. "
+        c += f"O USUÁRIO GOSTOU DESSES (Prioridade Alta para 9-10, Média para 7-8): {', '.join(data['positive'][:40])}. "
     if data.get('hated'): 
         c += f"O USUÁRIO DETESTOU/EVITAR (1-5): {', '.join(data['hated'][:20])}. "
     return c
 
-# --- NOVA FUNÇÃO DE BUSCA DIRETA (PARA O ORÁCULO) ---
-@st.cache_data(ttl=3600)
+# --- FUNÇÃO DE BUSCA DIRETA (SEM CACHE PARA SER DINÂMICA) ---
 def search_tmdb_by_name(query, content_type):
     """Busca um filme/série específico pelo nome no TMDB"""
     url = f"https://api.themoviedb.org/3/search/{content_type}"
@@ -122,57 +122,75 @@ def search_tmdb_by_name(query, content_type):
     except: pass
     return []
 
-# --- NOVA FUNÇÃO DE ANÁLISE DO ORÁCULO ---
 def oracle_analysis(target_item, user_context):
     prompt = f"""
     Atue como um algoritmo de compatibilidade de cinema.
-    
-    PERFIL DO USUÁRIO:
-    {user_context}
+    PERFIL DO USUÁRIO: {user_context}
     
     ALVO DA ANÁLISE:
-    Título: {target_item['title']}
+    Título: {target_item['title']} (Nota Pública: {target_item.get('vote_average')})
     Sinopse: {target_item['overview']}
-    Nota Pública: {target_item.get('vote_average')}
     
     TAREFA:
     Calcule a compatibilidade entre o usuário e este título específico.
     
-    SAÍDA ESPERADA (Responda EXATAMENTE neste formato de 3 linhas):
-    Linha 1: [Número de 0 a 100 representando a porcentagem de match]
+    SAÍDA ESPERADA (3 linhas exatas):
+    Linha 1: [Número de 0 a 100]
     Linha 2: [Veredito curto: "Vai amar", "Arriscado", "Pule", etc.]
-    Linha 3: [Explicação de 1 frase citando filmes do perfil que se parecem ou diferem]
+    Linha 3: [Explicação de 1 frase citando filmes do perfil]
     """
     try:
         model = genai.GenerativeModel('models/gemini-2.0-flash')
         return model.generate_content(prompt).text.strip()
-    except: return "50\nIncerto\nNão consegui analisar o perfil."
+    except: return "50\nIncerto\nErro na análise."
 
 def explain_choice(title, context_str, user_query, overview, rating):
     prompt = f"""
-    Atue como crítico de cinema. PERFIL: {context_str}. PEDIDO: "{user_query}". 
-    OBRA: "{title}" ({rating}/10). SINOPSE: {overview}.
-    TAREFA: Frase única e persuasiva conectando a obra ao perfil.
+    Atue como um amigo cinéfilo SINCERO e 'pé no chão'.
+    CONTEXTO:
+    - O usuário gosta de: {context_str}
+    - Ele pediu: "{user_query}"
+    - Filme sugerido: "{title}" (Nota: {rating}/10).
+    - Sinopse: {overview}
+    
+    REGRA DE OURO (LEIA COM ATENÇÃO):
+    1. JAMAIS compare filmes infantis/comédias bobas com clássicos sérios.
+    2. Se o filme for "divertido mas bobo", assuma isso!
+    3. Se o filme for desconhecido mas tiver nota alta, seja cético.
+    
+    SAÍDA:
+    Escreva apenas UMA frase (max 25 palavras) explicando o apelo do filme de forma honesta.
     """
     try:
-        return genai.GenerativeModel('models/gemini-2.0-flash').generate_content(prompt).text.strip()
+        model = genai.GenerativeModel('models/gemini-2.0-flash') 
+        return model.generate_content(prompt).text.strip()
     except: return "Recomendação baseada no seu perfil."
 
 def generate_marathon_plan(items, user_query):
-    candidates = "\n".join([f"- {i['title']}" for i in items[:10]])
-    prompt = f"Crie roteiro de maratona (3 filmes) lógico para: {user_query}. Lista: {candidates}."
+    candidates = "\n".join([f"- {i['title']} (ID: {i['id']})" for i in items[:10]])
+    prompt = f"""
+    Contexto: "{user_query}".
+    Lista: {candidates}
+    Crie um Roteiro de Maratona com 3 filmes dessa lista para ver em sequência lógica.
+    Retorne formato lista: 1. Nome - Motivo.
+    """
     try:
-        return genai.GenerativeModel('models/gemini-2.0-flash').generate_content(prompt).text.strip()
-    except: return "Erro."
+        model = genai.GenerativeModel('models/gemini-2.0-flash')
+        return model.generate_content(prompt).text.strip()
+    except: return "Erro ao gerar maratona."
 
 def convert_list_to_text(items, username):
     txt = f"🎬 Curadoria CineGourmet para {username}\n\n"
     for i, item in enumerate(items):
         rating = float(item.get('vote_average', 0) or 0)
-        txt += f"{i+1}. {item['title']} - ⭐ {rating:.1f}\n"
+        year = item.get('release_date', '')[:4] if item.get('release_date') else ''
+        if 'first_air_date' in item: year = item.get('first_air_date', '')[:4]
+        txt += f"{i+1}. {item['title']} ({year}) - ⭐ {rating:.1f}\n"
     return txt
 
-# === 3. LÓGICA HÍBRIDA & PARALELA ===
+# ==============================================================================
+# 3. LÓGICA HÍBRIDA & PARALELA
+# ==============================================================================
 
 def calculate_hybrid_score(item):
     sim_score = float(item.get('similarity', 0))
@@ -212,11 +230,15 @@ def process_batch_parallel(items, api_type, my_services, limit=5):
     results.sort(key=lambda x: x['hybrid_score'], reverse=True)
     return results[:limit]
 
-# === 4. PERSISTÊNCIA ===
+# ==============================================================================
+# 4. PERSISTÊNCIA
+# ==============================================================================
 
 def load_user_dashboard(username):
-    response = supabase.table("user_dashboards").select("*").eq("trakt_username", username).execute()
-    return response.data[0] if response.data else None
+    try:
+        response = supabase.table("user_dashboards").select("*").eq("trakt_username", username).execute()
+        return response.data[0] if response.data else None
+    except: return None
 
 def save_user_dashboard(username, curated_list, prefs):
     data = {"trakt_username": username, "curated_list": curated_list, "preferences": prefs, "updated_at": datetime.now().isoformat()}
@@ -233,7 +255,9 @@ def get_user_blacklist(username, content_type):
         return [x['content_id'] for x in response.data]
     except: return []
 
-# === 5. INTERFACE ===
+# ==============================================================================
+# 5. INTERFACE
+# ==============================================================================
 
 st.sidebar.title("🍿 CineGourmet")
 
@@ -248,7 +272,6 @@ with st.sidebar:
     
     if st.button("🔄 Sincronizar", help="Baixa histórico e notas (7+)."):
         if username:
-            # Limpa cache para forçar recarga
             if 'trakt_data' in st.session_state: del st.session_state['trakt_data']
             with st.spinner("Baixando dados..."):
                 st.session_state['trakt_data'] = get_trakt_profile_data(username, api_type)
@@ -261,6 +284,7 @@ with st.sidebar:
         d = st.session_state['trakt_data']
         if 'positive' in d:
             st.caption(f"✅ {len(d['positive'])} curtidos. 👀 {len(d['watched_ids'])} vistos.")
+        else: st.warning("Sincronize novamente.")
     
     st.divider()
     st.subheader("📺 Streamings")
@@ -268,16 +292,12 @@ with st.sidebar:
     my_services = st.multiselect("Assinaturas:", services_list, default=services_list)
     threshold = st.slider("Ousadia", 0.0, 1.0, 0.45)
 
-# MENU PRINCIPAL COM 4 OPÇÕES
 page = st.radio("Modo", ["🔍 Busca Rápida", "🔮 O Oráculo", "🧞 Akinator", "💎 Curadoria VIP"], horizontal=True, label_visibility="collapsed")
 st.divider()
 
-# ==============================================================================
-# PÁGINA 1: BUSCA RÁPIDA
-# ==============================================================================
+# === PÁGINA 1: BUSCA RÁPIDA ===
 if page == "🔍 Busca Rápida":
     st.title(f"🔍 Busca Turbo: {c_type}")
-    
     context_str = ""
     full_blocked_ids = []
     if 'trakt_data' in st.session_state and 'positive' in st.session_state['trakt_data']:
@@ -292,7 +312,6 @@ if page == "🔍 Busca Rápida":
         if not query and not context_str:
             st.error("Sincronize o Trakt primeiro!")
             st.stop()
-            
         final_prompt = f"Pedido: {query}. Contexto: {context_str}" if query else f"Analise: {context_str}. Recomende algo que ele vai AMAR."
         
         with st.spinner("IA processando..."):
@@ -302,8 +321,7 @@ if page == "🔍 Busca Rápida":
             if resp.data:
                 st.session_state['search_results'] = process_batch_parallel(resp.data, api_type, my_services, limit=10)
                 st.session_state['current_query'] = query if query else "Surpresa"
-            else:
-                st.session_state['search_results'] = []
+            else: st.session_state['search_results'] = []
 
     if 'search_results' in st.session_state and st.session_state['search_results']:
         if st.button("🍿 Gerar Roteiro de Maratona (3 Filmes)"):
@@ -328,91 +346,90 @@ if page == "🔍 Busca Rápida":
                     if item.get('providers_flat'):
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
-                            if i < 4: 
-                                with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                            if i < 4: with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
                     hybrid = int(item.get('hybrid_score', 0) * 100)
                     year = item.get('release_date', '')[:4] if item.get('release_date') else '????'
                     if 'first_air_date' in item: year = item.get('first_air_date', '')[:4]
-                    
                     st.markdown(f"### {item['title']} ({year})")
                     st.caption(f"⭐ {rating:.1f}/10 | 🧠 CineScore: {hybrid}")
                     st.progress(hybrid, text="Qualidade Geral")
-                    
                     expl = explain_choice(item['title'], context_str if context_str else "Geral", st.session_state.get('current_query', ''), item['overview'], rating)
                     st.success(f"💡 {expl}")
-                    
                     b1, b2 = st.columns(2)
                     if item.get('trailer'): b1.link_button("▶️ Trailer", item['trailer'])
                     if item.get('trakt_url'): b2.link_button("📝 Trakt", item['trakt_url'])
-                    with st.expander("Detalhes"):
-                         if item.get('ai_analysis'): st.info(f"🧠 {item['ai_analysis']}")
-                         st.write(item['overview'])
+                    with st.expander("Detalhes & Análise IA"):
+                        if item.get('ai_analysis'): st.info(f"🧠 {item['ai_analysis']}")
+                        st.write(f"**Sinopse:** {item['overview']}")
                 st.divider()
 
-# ==============================================================================
-# PÁGINA 2: O ORÁCULO (NOVO!)
-# ==============================================================================
+# === PÁGINA 2: O ORÁCULO (NOVO!) ===
 elif page == "🔮 O Oráculo":
     st.title(f"🔮 Oráculo de Compatibilidade")
-    st.caption(f"Digite o nome de um {c_type[:-2]} e a IA dirá se combina com você.")
+    st.caption(f"Digite o nome e a IA dirá se combina com você.")
     
     if 'trakt_data' not in st.session_state:
-        st.error("Sincronize o perfil na barra lateral para o Oráculo funcionar!")
+        st.error("Sincronize o perfil na barra lateral!")
     else:
+        # 1. Campo de Busca
         oracle_query = st.text_input("Nome do título:", placeholder="ex: Interestelar")
-        
-        if oracle_query and st.button("Consultar Oráculo"):
-            with st.spinner("Buscando dados e analisando seu DNA..."):
-                # 1. Busca no TMDB
-                search_results = search_tmdb_by_name(oracle_query, api_type)
-                
-                if not search_results:
-                    st.error("Não encontrei esse título no TMDB.")
+        if st.button("Procurar"):
+            if oracle_query:
+                # Busca no TMDB
+                res = search_tmdb_by_name(oracle_query, api_type)
+                if res:
+                    st.session_state['oracle_options'] = res
                 else:
-                    target = search_results[0] # Pega o primeiro
+                    st.error("Não encontrado.")
+
+        # 2. Seletor de Opções (Se houver resultados)
+        if 'oracle_options' in st.session_state:
+            options = st.session_state['oracle_options']
+            # Cria um dicionário para o selectbox: "Titulo (Ano)" -> Objeto Filme
+            options_map = {}
+            for m in options:
+                date = m.get('release_date') or m.get('first_air_date', '')
+                year = date[:4] if date else "????"
+                label = f"{m.get('title') or m.get('name')} ({year})"
+                options_map[label] = m
+            
+            selected_label = st.selectbox("Qual deles?", list(options_map.keys()))
+            target_item = options_map[selected_label]
+            
+            # 3. Botão de Análise Final
+            if st.button("🔮 Consultar Compatibilidade"):
+                with st.spinner("O Oráculo está lendo sua mente..."):
+                    # Processa detalhes (streaming)
+                    target_item = process_single_item(target_item, api_type, my_services) or target_item
                     
-                    # 2. Processa detalhes (Streaming etc)
-                    target = process_single_item(target, api_type, my_services) or target # Se não tiver streaming, mostra mesmo assim
-                    
-                    # 3. Consulta a IA
                     context_str = build_context_string(st.session_state['trakt_data'])
-                    oracle_res = oracle_analysis(target, context_str)
+                    oracle_res = oracle_analysis(target_item, context_str)
                     
-                    # Tenta parsear a resposta (Linha 1 = Score)
+                    # Parse do Resultado
                     lines = oracle_res.split('\n')
                     try:
                         score = int(lines[0].replace('%', '').strip())
-                        verdict = lines[1] if len(lines) > 1 else ""
-                        reason = lines[2] if len(lines) > 2 else ""
+                        verdict = lines[1]
+                        reason = lines[2]
                     except:
-                        score = 50
-                        verdict = "Incerto"
-                        reason = oracle_res
+                        score = 50; verdict = "Incerto"; reason = oracle_res
                     
-                    # 4. Exibe Resultado
                     st.divider()
                     c1, c2 = st.columns([1, 2])
                     with c1:
-                         if target.get('poster_path'): 
-                             st.image(TMDB_IMAGE + target['poster_path'], use_container_width=True)
+                         if target_item.get('poster_path'): st.image(TMDB_IMAGE + target_item['poster_path'])
                     with c2:
-                        st.subheader(f"{target['title']} (Match: {score}%)")
+                        st.subheader(f"Match: {score}%")
                         st.progress(score)
-                        
-                        if score > 80: st.success(f"🤩 Veredito: {verdict}")
-                        elif score > 50: st.warning(f"🤔 Veredito: {verdict}")
-                        else: st.error(f"💀 Veredito: {verdict}")
-                        
+                        if score > 80: st.success(f"🤩 {verdict}")
+                        elif score > 50: st.warning(f"🤔 {verdict}")
+                        else: st.error(f"💀 {verdict}")
                         st.info(f"🧠 {reason}")
-                        
-                        st.caption(f"Nota Pública: {target.get('vote_average')}")
-                        st.write(target['overview'])
+                        st.write(target_item['overview'])
 
-# ==============================================================================
-# PÁGINA 3: AKINATOR
-# ==============================================================================
+# === PÁGINA 3: AKINATOR ===
 elif page == "🧞 Akinator (Quiz)":
     st.title(f"🧞 Akinator: {c_type}")
     context_str = ""
@@ -445,7 +462,6 @@ elif page == "🧞 Akinator (Quiz)":
             else: st.error("Nada encontrado!")
 
     if 'search_results' in st.session_state and st.session_state.get('current_query') == "Quiz Akinator":
-        # Reutiliza loop de exibição (código simplificado para caber, use o mesmo do bloco de Busca Rápida acima se quiser igual)
         for item in st.session_state['search_results']:
              with st.container(border=True):
                  c1, c2 = st.columns([1,4])
@@ -454,9 +470,7 @@ elif page == "🧞 Akinator (Quiz)":
                      st.subheader(item['title'])
                      st.info(explain_choice(item['title'], context_str, "Quiz", item['overview'], 0))
 
-# ==============================================================================
-# PÁGINA 4: CURADORIA VIP
-# ==============================================================================
+# === PÁGINA 4: CURADORIA VIP ===
 elif page == "💎 Curadoria VIP":
     st.title(f"💎 Curadoria Fixa: {c_type}")
     if not username: st.error("Login necessário.")
