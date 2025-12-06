@@ -10,17 +10,23 @@ from urllib3.util.retry import Retry
 import random
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO E SEGREDOS
+# 1. CONFIGURAÇÃO E SEGREDOS (SUAS CHAVES)
 # ==============================================================================
 try:
-    SUPABASE_URL = st.secrets.get("SUPABASE_URL", "https://lbmhcmypsklbssatzgeh.supabase.co")
-    SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "sb_secret_CwzJw_N-j9sNwNrYPakveg_zGzQfNKs")
-    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "AIzaSyDjOi1VKtOVzvCSbYn_9TrxyKz5duQiOz0")
+    SUPABASE_URL = "https://lbmhcmypsklbssatzgeh.supabase.co"
+    SUPABASE_KEY = "sb_secret_CwzJw_N-j9sNwNrYPakveg_zGzQfNKs" 
+    GOOGLE_API_KEY = "AIzaSyDjOi1VKtOVzvCSbYn_9TrxyKz5duQiOz0"
     
-    TRAKT_CLIENT_ID = st.secrets.get("TRAKT_CLIENT_ID", "SEU_CLIENT_ID")
-    TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "SUA_CHAVE_TMDB")
+    # Se usar st.secrets, descomente:
+    # SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    # SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    # GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    
+    TRAKT_CLIENT_ID = st.secrets.get("TRAKT_CLIENT_ID", "") 
+    TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "")
+
 except:
-    st.error("🚨 Erro de Configuração de Chaves.")
+    st.error("🚨 Erro nas configurações de chaves.")
     st.stop()
 
 genai.configure(api_key=GOOGLE_API_KEY)
@@ -59,6 +65,7 @@ def get_trakt_profile_data(username, content_type="movies"):
             for item in r_ratings.json():
                 title = item[item_key]['title']
                 rating = item['rating']
+                
                 if rating >= 7:
                     data["positive"].append((rating, f"{title} ({rating}/10)"))
                 elif rating <= 5:
@@ -110,9 +117,9 @@ def build_context_string(data):
         c += f"O USUÁRIO DETESTOU/EVITAR (1-5): {', '.join(data['hated'][:20])}. "
     return c
 
-# --- FUNÇÃO DE BUSCA DIRETA (SEM CACHE PARA SER DINÂMICA) ---
+# --- FUNÇÃO DE BUSCA DIRETA (PARA O ORÁCULO) ---
+@st.cache_data(ttl=3600)
 def search_tmdb_by_name(query, content_type):
-    """Busca um filme/série específico pelo nome no TMDB"""
     url = f"https://api.themoviedb.org/3/search/{content_type}"
     params = {"api_key": TMDB_API_KEY, "query": query, "language": "pt-BR", "page": 1}
     try:
@@ -136,8 +143,8 @@ def oracle_analysis(target_item, user_context):
     
     SAÍDA ESPERADA (3 linhas exatas):
     Linha 1: [Número de 0 a 100]
-    Linha 2: [Veredito curto: "Vai amar", "Arriscado", "Pule", etc.]
-    Linha 3: [Explicação de 1 frase citando filmes do perfil]
+    Linha 2: [Veredito curto]
+    Linha 3: [Explicação de 1 frase]
     """
     try:
         model = genai.GenerativeModel('models/gemini-2.0-flash')
@@ -284,7 +291,6 @@ with st.sidebar:
         d = st.session_state['trakt_data']
         if 'positive' in d:
             st.caption(f"✅ {len(d['positive'])} curtidos. 👀 {len(d['watched_ids'])} vistos.")
-        else: st.warning("Sincronize novamente.")
     
     st.divider()
     st.subheader("📺 Streamings")
@@ -346,7 +352,10 @@ if page == "🔍 Busca Rápida":
                     if item.get('providers_flat'):
                         cols = st.columns(len(item['providers_flat']))
                         for i, p in enumerate(item['providers_flat']):
-                            if i < 4: with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                            # === CORREÇÃO DE INDENTAÇÃO AQUI ===
+                            if i < 4: 
+                                with cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=25)
+                            # ===================================
                 with c2:
                     rating = float(item.get('vote_average', 0) or 0)
                     hybrid = int(item.get('hybrid_score', 0) * 100)
@@ -365,61 +374,46 @@ if page == "🔍 Busca Rápida":
                         st.write(f"**Sinopse:** {item['overview']}")
                 st.divider()
 
-# === PÁGINA 2: O ORÁCULO (NOVO!) ===
+# === PÁGINA 2: O ORÁCULO ===
 elif page == "🔮 O Oráculo":
     st.title(f"🔮 Oráculo de Compatibilidade")
     st.caption(f"Digite o nome e a IA dirá se combina com você.")
     
-    if 'trakt_data' not in st.session_state:
-        st.error("Sincronize o perfil na barra lateral!")
+    if 'trakt_data' not in st.session_state: st.error("Sincronize o perfil!")
     else:
-        # 1. Campo de Busca
-        oracle_query = st.text_input("Nome do título:", placeholder="ex: Interestelar")
+        oracle_query = st.text_input("Nome:", placeholder="ex: Interestelar")
         if st.button("Procurar"):
-            if oracle_query:
-                # Busca no TMDB
-                res = search_tmdb_by_name(oracle_query, api_type)
-                if res:
-                    st.session_state['oracle_options'] = res
-                else:
-                    st.error("Não encontrado.")
+            res = search_tmdb_by_name(oracle_query, api_type)
+            if res: st.session_state['oracle_options'] = res
+            else: st.error("Não encontrado.")
 
-        # 2. Seletor de Opções (Se houver resultados)
         if 'oracle_options' in st.session_state:
-            options = st.session_state['oracle_options']
-            # Cria um dicionário para o selectbox: "Titulo (Ano)" -> Objeto Filme
             options_map = {}
-            for m in options:
+            for m in st.session_state['oracle_options']:
                 date = m.get('release_date') or m.get('first_air_date', '')
                 year = date[:4] if date else "????"
-                label = f"{m.get('title') or m.get('name')} ({year})"
-                options_map[label] = m
+                options_map[f"{m.get('title') or m.get('name')} ({year})"] = m
             
-            selected_label = st.selectbox("Qual deles?", list(options_map.keys()))
-            target_item = options_map[selected_label]
+            selected = st.selectbox("Qual deles?", list(options_map.keys()))
+            target = options_map[selected]
             
-            # 3. Botão de Análise Final
-            if st.button("🔮 Consultar Compatibilidade"):
-                with st.spinner("O Oráculo está lendo sua mente..."):
-                    # Processa detalhes (streaming)
-                    target_item = process_single_item(target_item, api_type, my_services) or target_item
-                    
+            if st.button("🔮 Consultar"):
+                with st.spinner("Analisando..."):
+                    target = process_single_item(target, api_type, my_services) or target
                     context_str = build_context_string(st.session_state['trakt_data'])
-                    oracle_res = oracle_analysis(target_item, context_str)
+                    oracle_res = oracle_analysis(target, context_str)
                     
-                    # Parse do Resultado
                     lines = oracle_res.split('\n')
                     try:
                         score = int(lines[0].replace('%', '').strip())
                         verdict = lines[1]
                         reason = lines[2]
-                    except:
-                        score = 50; verdict = "Incerto"; reason = oracle_res
+                    except: score = 50; verdict = "Incerto"; reason = oracle_res
                     
                     st.divider()
                     c1, c2 = st.columns([1, 2])
                     with c1:
-                         if target_item.get('poster_path'): st.image(TMDB_IMAGE + target_item['poster_path'])
+                         if target.get('poster_path'): st.image(TMDB_IMAGE + target['poster_path'])
                     with c2:
                         st.subheader(f"Match: {score}%")
                         st.progress(score)
@@ -427,7 +421,7 @@ elif page == "🔮 O Oráculo":
                         elif score > 50: st.warning(f"🤔 {verdict}")
                         else: st.error(f"💀 {verdict}")
                         st.info(f"🧠 {reason}")
-                        st.write(target_item['overview'])
+                        st.write(target['overview'])
 
 # === PÁGINA 3: AKINATOR ===
 elif page == "🧞 Akinator (Quiz)":
@@ -452,7 +446,7 @@ elif page == "🧞 Akinator (Quiz)":
 
     if submit:
         prompt = f"Quiz: Vibe {q_mood}, Época {q_era}, Ritmo {q_pace}, Nível {q_comp}, Extra {q_extra}. Perfil: {context_str}"
-        with st.spinner("O gênio está pensando..."):
+        with st.spinner("Pensando..."):
             vector = genai.embed_content(model="models/text-embedding-004", content=prompt)['embedding']
             resp = supabase.rpc(db_func, {"query_embedding": vector, "match_threshold": threshold, "match_count": 60, "filter_ids": full_blocked_ids}).execute()
             if resp.data:
@@ -508,5 +502,10 @@ elif page == "💎 Curadoria VIP":
                         if item['poster_path']: st.image(TMDB_IMAGE + item['poster_path'])
                         st.markdown(f"**{item['title']}**")
                         if item.get('providers_flat'):
-                             for p in item['providers_flat'][:3]: st.image(TMDB_LOGO + p['logo_path'], width=20)
+                             # === CORREÇÃO DE INDENTAÇÃO AQUI TAMBÉM ===
+                             p_cols = st.columns(len(item['providers_flat']))
+                             for i, p in enumerate(item['providers_flat']):
+                                 if i < 4: 
+                                    with p_cols[i]: st.image(TMDB_LOGO + p['logo_path'], width=20)
+                        
                         with st.expander("Detalhes"): st.write(item['overview'])
